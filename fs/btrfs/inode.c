@@ -7198,6 +7198,17 @@ out:
 	btrfs_free_path(path);
 	return ret;
 }
+static void btrfs_put_folio(struct inode *inode, loff_t pos,
+		unsigned copied, struct folio *folio)
+{
+	set_page_extent_mapped(&folio->page);
+	folio_unlock(folio);
+	folio_put(folio);
+}
+
+static const struct iomap_folio_ops btrfs_iomap_folio_ops = {
+	.put_folio = btrfs_put_folio,
+};
 
 void btrfs_em_to_iomap(struct inode *inode,
 		struct extent_map *em, struct iomap *iomap,
@@ -7224,6 +7235,7 @@ void btrfs_em_to_iomap(struct inode *inode,
 	iomap->offset = em->start + diff;
 	iomap->bdev = fs_info->fs_devices->latest_dev->bdev;
 	iomap->length = em->len - diff;
+	iomap->folio_ops = &btrfs_iomap_folio_ops;
 }
 
 static int lock_extent_direct(struct inode *inode, u64 lockstart, u64 lockend,
