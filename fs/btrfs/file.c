@@ -845,14 +845,12 @@ out:
  * on success we return a locked page and 0
  */
 static int prepare_uptodate_page(struct inode *inode,
-				 struct page *page, u64 pos,
-				 bool force_uptodate)
+				 struct page *page, u64 pos)
 {
 	struct folio *folio = page_folio(page);
 	int ret = 0;
 
-	if (((pos & (PAGE_SIZE - 1)) || force_uptodate) &&
-	    !PageUptodate(page)) {
+	if ((pos & (PAGE_SIZE - 1)) && !PageUptodate(page)) {
 		ret = btrfs_read_folio(NULL, folio);
 		if (ret)
 			return ret;
@@ -908,8 +906,7 @@ static gfp_t get_prepare_gfp_flags(struct inode *inode, bool nowait)
  */
 static noinline int prepare_pages(struct inode *inode, struct page **pages,
 				  size_t num_pages, loff_t pos,
-				  size_t write_bytes, bool force_uptodate,
-				  bool nowait)
+				  size_t write_bytes, bool nowait)
 {
 	int i;
 	unsigned long index = pos >> PAGE_SHIFT;
@@ -938,11 +935,10 @@ again:
 		}
 
 		if (i == 0)
-			err = prepare_uptodate_page(inode, pages[i], pos,
-						    force_uptodate);
+			err = prepare_uptodate_page(inode, pages[i], pos);
 		if (!err && i == num_pages - 1)
 			err = prepare_uptodate_page(inode, pages[i],
-						    pos + write_bytes, false);
+						    pos + write_bytes);
 		if (err) {
 			put_page(pages[i]);
 			if (!nowait && err == -EAGAIN) {
@@ -1174,7 +1170,6 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 	int nrptrs;
 	ssize_t ret;
 	bool only_release_metadata = false;
-	bool force_page_uptodate = false;
 	loff_t old_isize = i_size_read(inode);
 	unsigned int ilock_flags = 0;
 	const bool nowait = (iocb->ki_flags & IOCB_NOWAIT);
@@ -1305,7 +1300,7 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 		 * contents of pages from loop to loop
 		 */
 		ret = prepare_pages(inode, pages, num_pages,
-				    pos, write_bytes, force_page_uptodate, false);
+				    pos, write_bytes, false);
 		if (ret)
 			btrfs_delalloc_release_extents(BTRFS_I(inode),
 						       reserve_bytes);
@@ -1325,11 +1320,9 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 			nrptrs = 1;
 
 		if (copied == 0) {
-			force_page_uptodate = true;
 			dirty_sectors = 0;
 			dirty_pages = 0;
 		} else {
-			force_page_uptodate = false;
 			dirty_pages = DIV_ROUND_UP(copied + offset,
 						   PAGE_SIZE);
 		}
