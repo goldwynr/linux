@@ -7950,6 +7950,94 @@ static int btrfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	return ret;
 }
 
+static int find_delalloc_range(struct inode *inode, u64 *start, u64 *end)
+{
+	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
+	bool found;
+	int ret;
+	struct extent_state *cached = NULL;
+
+	/* Find the range */
+	found = btrfs_find_delalloc_range(tree, start, end,
+			BTRFS_MAX_EXTENT_SIZE, &cached);
+	if (!found)
+		return AOP_WRITEPAGE_ACTIVATE;
+
+	/* Verify it is set to delalloc */
+	ret = test_range_bit(tree, *start, *end,
+			EXTENT_DELALLOC, cached);
+	if (!ret)
+		return -EIO;
+	return 0;
+}
+
+static int btrfs_set_iomap(struct inode *inode, loff_t pos,
+                loff_t length, struct iomap *srcmap)
+{
+        struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+        loff_t sector_start = round_down(pos, fs_info->sectorsize);
+        struct extent_map *em;
+
+        em = btrfs_get_extent(BTRFS_I(inode), NULL, sector_start, length);
+        if (IS_ERR(em))
+                return PTR_ERR(em);
+
+        btrfs_em_to_iomap(inode, em, srcmap, sector_start, true);
+
+        free_extent_map(em);
+        return 0;
+}
+
+static void btrfs_oe_to_iomap(struct inode *inode,
+		struct btrfs_ordered_extent *ordered, struct iomap *iomap)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+
+	iomap->type = IOMAP_MAPPED;
+	iomap->offset = ordered->file_offset;
+	iomap->addr = ordered->disk_bytenr;
+	iomap->bdev = fs_info->fs_devices->latest_dev->bdev;
+	iomap->length = ordered->num_bytes;
+}
+
+static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
+		struct inode *inode, loff_t offset)
+{
+	int ret;
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	u64 start = round_down(offset, fs_info->sectorsize);
+	u64 end = 0;
+	struct btrfs_ordered_extent *ordered;
+
+	/* Check if iomap is valid */
+	if (offset >= wpc->iomap.offset &&
+			offset < wpc->iomap.offset + wpc->iomap.length)
+		return 0;
+
+	/* Check if there is an existing ordered extent */
+	ordered = btrfs_lookup_ordered_extent(BTRFS_I(inode), offset);
+	if (ordered) {
+		btrfs_oe_to_iomap(inode, ordered, &wpc->iomap);
+		btrfs_put_ordered_extent(ordered);
+		return 0;
+	}
+
+	ret = find_delalloc_range(inode, &start, &end);
+	if (ret != 0)
+		return ret;
+
+	ret = btrfs_run_delalloc_range(BTRFS_I(inode), NULL,
+			start, end, wpc->wbc);
+	if (ret < 0)
+		return ret;
+	return btrfs_set_iomap(inode, offset, end - offset, &wpc->iomap);
+}
+
+static const struct iomap_writeback_ops btrfs_writeback_ops = {
+	.map_blocks             = btrfs_map_blocks,
+};
+
+
 static int btrfs_writepages(struct address_space *mapping,
 			    struct writeback_control *wbc)
 {
