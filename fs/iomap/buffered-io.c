@@ -1738,7 +1738,11 @@ iomap_submit_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioend *ioend,
 		return error;
 	}
 
-	submit_bio(ioend->io_bio);
+	if (wpc->ops->submit_io)
+		wpc->ops->submit_io(ioend, ioend->io_bio, wpc->wbc);
+	else
+		submit_bio(ioend->io_bio);
+
 	return 0;
 }
 
@@ -1776,9 +1780,10 @@ iomap_alloc_ioend(struct inode *inode, struct iomap_writepage_ctx *wpc,
  * traversal in iomap_finish_ioend().
  */
 static struct bio *
-iomap_chain_bio(struct bio *prev)
+iomap_chain_bio(struct iomap_writepage_ctx *wpc)
 {
 	struct bio *new;
+	struct bio *prev = wpc->ioend->io_bio;
 
 	new = bio_alloc(prev->bi_bdev, BIO_MAX_VECS, prev->bi_opf, GFP_NOFS);
 	bio_clone_blkg_association(new, prev);
@@ -1786,7 +1791,10 @@ iomap_chain_bio(struct bio *prev)
 
 	bio_chain(prev, new);
 	bio_get(prev);		/* for iomap_finish_ioend */
-	submit_bio(prev);
+	if (wpc->ops->submit_io)
+		wpc->ops->submit_io(wpc->ioend, prev, wpc->wbc);
+	else
+		submit_bio(prev);
 	return new;
 }
 
@@ -1843,7 +1851,7 @@ iomap_add_to_ioend(struct inode *inode, loff_t pos, struct folio *folio,
 	}
 
 	if (!bio_add_folio(wpc->ioend->io_bio, folio, len, poff)) {
-		wpc->ioend->io_bio = iomap_chain_bio(wpc->ioend->io_bio);
+		wpc->ioend->io_bio = iomap_chain_bio(wpc);
 		bio_add_folio_nofail(wpc->ioend->io_bio, folio, len, poff);
 	}
 

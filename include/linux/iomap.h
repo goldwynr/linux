@@ -341,6 +341,13 @@ struct iomap_writeback_ops {
 	 * we failed to submit any I/O.
 	 */
 	void (*discard_folio)(struct folio *folio, loff_t pos);
+
+	/*
+	 * Optional, allows the filesystem to perform a custom submission of
+	 * bio, such as csum calculations or multi-device bio split
+	 */
+	void (*submit_io)(struct iomap_ioend *ioend, struct bio *bio,
+			struct writeback_control *wbc);
 };
 
 struct iomap_writepage_ctx {
