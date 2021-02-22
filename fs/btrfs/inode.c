@@ -1355,7 +1355,8 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 			 * can't determine if it's an inline extent or a
 			 * compressed extent.
 			 */
-			unlock_page(locked_page);
+			if (locked_page)
+				unlock_page(locked_page);
 			ret = 1;
 			goto done;
 		} else if (ret < 0) {
@@ -2265,8 +2266,9 @@ int btrfs_run_delalloc_range(struct btrfs_inode *inode, struct page *locked_page
 	 * The range must cover part of the @locked_page, or a return of 1
 	 * can confuse the caller.
 	 */
-	ASSERT(!(end <= page_offset(locked_page) ||
-		 start >= page_offset(locked_page) + PAGE_SIZE));
+	if (locked_page)
+		ASSERT(!(end <= page_offset(locked_page) ||
+			 start >= page_offset(locked_page) + PAGE_SIZE));
 
 	if (should_nocow(inode, start, end)) {
 		ret = run_delalloc_nocow(inode, locked_page, start, end);
