@@ -17,6 +17,7 @@
 #include <linux/fscrypt.h>
 #include <linux/lockdep.h>
 #include <uapi/linux/btrfs_tree.h>
+#include <linux/iomap.h>
 #include <trace/events/btrfs.h>
 #include "block-rsv.h"
 #include "btrfs_inode.h"
@@ -559,5 +560,6 @@ void btrfs_inode_unlock(struct btrfs_inode *inode, unsigned int ilock_flags);
 void btrfs_update_inode_bytes(struct btrfs_inode *inode, const u64 add_bytes,
 			      const u64 del_bytes);
 void btrfs_assert_inode_range_clean(struct btrfs_inode *inode, u64 start, u64 end);
-
+void btrfs_em_to_iomap(struct inode *inode, struct extent_map *em,
+		struct iomap *iomap, loff_t pos, bool write);
 #endif

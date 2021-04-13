@@ -7199,6 +7199,33 @@ out:
 	return ret;
 }
 
+void btrfs_em_to_iomap(struct inode *inode,
+		struct extent_map *em, struct iomap *iomap,
+		loff_t sector_pos, bool write)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	loff_t diff = sector_pos - em->start;
+
+	if (em->block_start == EXTENT_MAP_INLINE) {
+		iomap->addr = IOMAP_NULL_ADDR;
+		iomap->type = IOMAP_INLINE;
+	} else if (em->block_start == EXTENT_MAP_HOLE ||
+		   (!write && (em->flags & EXTENT_FLAG_PREALLOC))) {
+		iomap->addr = IOMAP_NULL_ADDR;
+		iomap->type = IOMAP_HOLE;
+	} else if (extent_map_is_compressed(em)) {
+		diff = 0;
+		iomap->type = IOMAP_ENCODED;
+		iomap->addr = em->block_start;
+	} else {
+		iomap->addr = em->block_start + diff;
+		iomap->type = IOMAP_MAPPED;
+	}
+	iomap->offset = em->start + diff;
+	iomap->bdev = fs_info->fs_devices->latest_dev->bdev;
+	iomap->length = em->len - diff;
+}
+
 static int lock_extent_direct(struct inode *inode, u64 lockstart, u64 lockend,
 			      struct extent_state **cached_state,
 			      unsigned int iomap_flags)
