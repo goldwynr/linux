@@ -1033,6 +1033,7 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 	size_t write_bytes = length;
 	struct btrfs_iomap *bi;
 	bool nowait = iomap->flags & IOMAP_NOWAIT;
+	loff_t end;
 
 	bi = kzalloc(sizeof(struct btrfs_iomap), GFP_NOFS);
 	if (!bi)
@@ -1043,6 +1044,8 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 	bi->metadata_only = false;
 
 	extent_changeset_release(bi->data_reserved);
+
+
 	ret = btrfs_check_data_free_space(BTRFS_I(inode),
 			&bi->data_reserved, pos,
 			write_bytes, nowait);
@@ -1106,6 +1109,31 @@ again:
 	iomap->bdev = fs_info->fs_devices->latest_dev->bdev;
 	iomap->folio_ops = &btrfs_iomap_folio_ops;
 
+	end = pos + write_bytes;
+	if ((pos & (PAGE_SIZE - 1) || end & (PAGE_SIZE - 1))) {
+		loff_t isize = i_size_read(inode);
+
+		if (pos >= isize) {
+			srcmap->addr = IOMAP_NULL_ADDR;
+			srcmap->type = IOMAP_HOLE;
+			srcmap->offset = isize;
+			srcmap->length = end - isize;
+		} else {
+			struct extent_map *em;
+			em = btrfs_get_extent(BTRFS_I(inode), NULL,
+					pos - sector_offset, length);
+			if (IS_ERR(em)) {
+				ret = PTR_ERR(em);
+				goto out;
+			}
+			btrfs_em_to_iomap(inode, em, srcmap,
+					pos - sector_offset, false);
+			free_extent_map(em);
+		}
+	}
+out:
+	if (ret < 0)
+		btrfs_iomap_release(BTRFS_I(inode), pos, bi->reserved_bytes, bi);
 	return ret;
 }
 
