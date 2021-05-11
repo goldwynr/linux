@@ -1169,6 +1169,31 @@ static int btrfs_write_check(struct kiocb *iocb, struct iov_iter *from,
 	return 0;
 }
 
+/*
+ * btrfs_iomap_release - release reservation passed as length and free
+ * the btrfs_iomap structure
+ */
+static void btrfs_iomap_release(struct btrfs_inode *inode,
+		loff_t pos, size_t length, struct btrfs_iomap *bi)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->vfs_inode.i_sb);
+
+	if (length) {
+		if (bi->metadata_only) {
+			btrfs_delalloc_release_metadata(inode,
+					length, true);
+		} else {
+			btrfs_delalloc_release_space(inode,
+					bi->data_reserved,
+					round_down(pos, fs_info->sectorsize),
+					length, true);
+		}
+	}
+	btrfs_delalloc_release_extents(inode, bi->reserved_bytes);
+	extent_changeset_free(bi->data_reserved);
+	kfree(bi);
+}
+
 static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 		size_t length, struct btrfs_iomap *bi)
 {
@@ -1277,18 +1302,11 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
 	if (bi->metadata_only)
 		btrfs_check_nocow_unlock(BTRFS_I(inode));
 
-	if (bi->reserved_bytes > block_len) {
+	if (bi->reserved_bytes > block_len)
 		release_bytes = bi->reserved_bytes - block_len;
-		if (bi->metadata_only)
-			btrfs_delalloc_release_metadata(BTRFS_I(inode),
-					release_bytes, true);
-		else
-			btrfs_delalloc_release_space(BTRFS_I(inode),
-					bi->data_reserved, block_end,
-					release_bytes, true);
-	}
 
-	btrfs_delalloc_release_extents(BTRFS_I(inode), bi->reserved_bytes);
+	btrfs_iomap_release(BTRFS_I(inode), block_start, release_bytes, bi);
+
 	return ret;
 }
 
@@ -1296,11 +1314,10 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 					       struct iov_iter *i)
 {
 	struct file *file = iocb->ki_filp;
-	loff_t pos;
+	loff_t pos = iocb->ki_pos;
 	struct inode *inode = file_inode(file);
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
 	struct page **pages = NULL;
-	u64 release_bytes = 0;
 	size_t num_written = 0;
 	int nrptrs;
 	int ret;
@@ -1308,6 +1325,7 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 	unsigned int ilock_flags = 0;
 	const bool nowait = (iocb->ki_flags & IOCB_NOWAIT);
 	struct btrfs_iomap *bi = NULL;
+	size_t copied = 0;
 
 	if (nowait)
 		ilock_flags |= BTRFS_ILOCK_TRY;
@@ -1348,7 +1366,6 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 					 offset);
 		size_t num_pages;
 		size_t dirty_pages;
-		size_t copied;
 
 		/*
 		 * Fault pages before locking them in prepare_pages
@@ -1365,7 +1382,6 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 
 		num_pages = DIV_ROUND_UP(write_bytes + offset, PAGE_SIZE);
 		WARN_ON(num_pages > nrptrs);
-		release_bytes = bi->reserved_bytes;
 
 		/*
 		 * This is going to setup the pages array with the number of
@@ -1413,27 +1429,14 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 
 	kfree(pages);
 
-	if (release_bytes) {
-		if (bi->metadata_only) {
-			btrfs_check_nocow_unlock(BTRFS_I(inode));
-			btrfs_delalloc_release_metadata(BTRFS_I(inode),
-					release_bytes, true);
-		} else {
-			btrfs_delalloc_release_space(BTRFS_I(inode),
-					bi->data_reserved,
-					round_down(pos, fs_info->sectorsize),
-					release_bytes, true);
-		}
-	}
-
-	extent_changeset_free(bi->data_reserved);
-	kfree(bi);
 	if (num_written > 0) {
 		pagecache_isize_extended(inode, old_isize, iocb->ki_pos);
 		iocb->ki_pos += num_written;
 	}
+
 out:
-	kfree(bi);
+	btrfs_iomap_release(BTRFS_I(inode), pos, bi->reserved_bytes - copied,
+			bi);
 	btrfs_inode_unlock(BTRFS_I(inode), ilock_flags);
 	return num_written ? num_written : ret;
 }
