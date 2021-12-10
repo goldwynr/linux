@@ -131,7 +131,7 @@ static const struct file_operations btrfs_dir_file_operations;
 static struct kmem_cache *btrfs_inode_cachep;
 
 static int btrfs_setsize(struct inode *inode, struct iattr *attr);
-static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback);
+static int btrfs_truncate(struct btrfs_inode *inode);
 
 static noinline int run_delalloc_cow(struct btrfs_inode *inode,
 				     struct page *locked_page, u64 start,
@@ -4719,8 +4719,6 @@ int btrfs_truncate_block(struct btrfs_inode *inode, loff_t from, loff_t len,
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct address_space *mapping = inode->vfs_inode.i_mapping;
-	struct extent_io_tree *io_tree = &inode->io_tree;
-	struct btrfs_ordered_extent *ordered;
 	struct extent_state *cached_state = NULL;
 	struct extent_changeset *data_reserved = NULL;
 	bool only_release_metadata = false;
@@ -4751,7 +4749,7 @@ int btrfs_truncate_block(struct btrfs_inode *inode, loff_t from, loff_t len,
 			goto out;
 		}
 	}
-	ret = btrfs_delalloc_reserve_metadata(inode, blocksize, blocksize, false);
+	ret = btrfs_delalloc_reserve_metadata(inode, blocksize, blocksize, true);
 	if (ret < 0) {
 		if (!only_release_metadata)
 			btrfs_free_reserved_data_space(inode, data_reserved,
@@ -4793,30 +4791,14 @@ again:
 	if (ret < 0)
 		goto out_unlock;
 
-	folio_wait_writeback(folio);
-
-	lock_extent(io_tree, block_start, block_end, &cached_state);
-
-	ordered = btrfs_lookup_ordered_extent(inode, block_start);
-	if (ordered) {
-		unlock_extent(io_tree, block_start, block_end, &cached_state);
-		folio_unlock(folio);
-		folio_put(folio);
-		btrfs_start_ordered_extent(ordered);
-		btrfs_put_ordered_extent(ordered);
-		goto again;
-	}
-
 	clear_extent_bit(&inode->io_tree, block_start, block_end,
 			 EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
 			 &cached_state);
 
 	ret = btrfs_set_extent_delalloc(inode, block_start, block_end, 0,
 					&cached_state);
-	if (ret) {
-		unlock_extent(io_tree, block_start, block_end, &cached_state);
+	if (ret)
 		goto out_unlock;
-	}
 
 	if (offset != blocksize) {
 		if (!len)
@@ -4833,7 +4815,6 @@ again:
 				  block_end + 1 - block_start);
 	btrfs_folio_set_dirty(fs_info, folio, block_start,
 			      block_end + 1 - block_start);
-	unlock_extent(io_tree, block_start, block_end, &cached_state);
 
 	if (only_release_metadata)
 		set_extent_bit(&inode->io_tree, block_start, block_end,
@@ -4926,19 +4907,24 @@ int btrfs_cont_expand(struct btrfs_inode *inode, loff_t oldsize, loff_t size)
 	int err = 0;
 
 	/*
+	 * Check so that no erroneous nodes are created in locking trees
+	 * when hole_start and block_end are equal.
+	 */
+	if (hole_start != block_end)
+		btrfs_lock_and_flush_ordered_range(inode, hole_start, block_end - 1, &cached_state);
+
+	/*
 	 * If our size started in the middle of a block we need to zero out the
 	 * rest of the block before we expand the i_size, otherwise we could
 	 * expose stale data.
 	 */
 	err = btrfs_truncate_block(inode, oldsize, 0, 0);
 	if (err)
-		return err;
+		goto out;
 
 	if (size <= hole_start)
-		return 0;
+		goto out;
 
-	btrfs_lock_and_flush_ordered_range(inode, hole_start, block_end - 1,
-					   &cached_state);
 	cur_offset = hole_start;
 	while (1) {
 		em = btrfs_get_extent(inode, NULL, cur_offset, block_end - cur_offset);
@@ -4997,7 +4983,9 @@ next:
 			break;
 	}
 	free_extent_map(em);
-	unlock_extent(io_tree, hole_start, block_end - 1, &cached_state);
+out:
+	if (hole_start != block_end)
+		unlock_extent(io_tree, hole_start, block_end - 1, &cached_state);
 	return err;
 }
 
@@ -5009,6 +4997,7 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 	loff_t newsize = attr->ia_size;
 	int mask = attr->ia_valid;
 	int ret;
+	bool flushed = false;
 
 	/*
 	 * The regular truncate() case without ATTR_CTIME and ATTR_MTIME is a
@@ -5052,15 +5041,10 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 		btrfs_drew_write_unlock(&root->snapshot_lock);
 		btrfs_end_transaction(trans);
 	} else {
-		struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-
-		if (btrfs_is_zoned(fs_info)) {
-			ret = btrfs_wait_ordered_range(inode,
-					ALIGN(newsize, fs_info->sectorsize),
-					(u64)-1);
-			if (ret)
-				return ret;
-		}
+		struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+		u64 start = round_down(newsize, fs_info->sectorsize);
+		u64 end = round_up(oldsize, fs_info->sectorsize) - 1;
+		struct extent_state **cached = NULL;
 
 		/*
 		 * We're truncating a file that used to have good data down to
@@ -5070,12 +5054,23 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr)
 		if (newsize == 0)
 			set_bit(BTRFS_INODE_FLUSH_ON_CLOSE,
 				&BTRFS_I(inode)->runtime_flags);
-
+again:
+		if (start < end)
+			btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), start, end, cached);
 		truncate_setsize(inode, newsize);
 
 		inode_dio_wait(inode);
 
-		ret = btrfs_truncate(BTRFS_I(inode), newsize == oldsize);
+		ret = btrfs_truncate(BTRFS_I(inode));
+		if (start < end)
+			unlock_extent(&BTRFS_I(inode)->io_tree, start, end, cached);
+
+		if (ret == -EDQUOT && !flushed) {
+			flushed = true;
+			btrfs_qgroup_flush(BTRFS_I(inode)->root);
+			goto again;
+		}
+
 		if (ret && inode->i_nlink) {
 			int err;
 
@@ -8042,9 +8037,6 @@ static void btrfs_invalidate_folio(struct folio *folio, size_t offset,
 		return;
 	}
 
-	if (!inode_evicting)
-		lock_extent(tree, page_start, page_end, &cached_state);
-
 	cur = page_start;
 	while (cur < page_end) {
 		struct btrfs_ordered_extent *ordered;
@@ -8145,7 +8137,7 @@ next:
 		 */
 		btrfs_qgroup_free_data(inode, NULL, cur, range_end + 1 - cur, NULL);
 		if (!inode_evicting) {
-			clear_extent_bit(tree, cur, range_end, EXTENT_LOCKED |
+			clear_extent_bit(tree, cur, range_end,
 				 EXTENT_DELALLOC | EXTENT_UPTODATE |
 				 EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG |
 				 extra_flags, &cached_state);
@@ -8331,7 +8323,7 @@ out_noreserve:
 	return ret;
 }
 
-static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback)
+static int btrfs_truncate(struct btrfs_inode *inode)
 {
 	struct btrfs_truncate_control control = {
 		.inode = inode,
@@ -8344,16 +8336,7 @@ static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback)
 	struct btrfs_block_rsv *rsv;
 	int ret;
 	struct btrfs_trans_handle *trans;
-	u64 mask = fs_info->sectorsize - 1;
 	const u64 min_size = btrfs_calc_metadata_size(fs_info, 1);
-
-	if (!skip_writeback) {
-		ret = btrfs_wait_ordered_range(&inode->vfs_inode,
-					       inode->vfs_inode.i_size & (~mask),
-					       (u64)-1);
-		if (ret)
-			return ret;
-	}
 
 	/*
 	 * Yes ladies and gentlemen, this is indeed ugly.  We have a couple of
@@ -8415,12 +8398,9 @@ static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback)
 	trans->block_rsv = rsv;
 
 	while (1) {
-		struct extent_state *cached_state = NULL;
 		const u64 new_size = inode->vfs_inode.i_size;
-		const u64 lock_start = ALIGN_DOWN(new_size, fs_info->sectorsize);
 
 		control.new_size = new_size;
-		lock_extent(&inode->io_tree, lock_start, (u64)-1, &cached_state);
 		/*
 		 * We want to drop from the next block forward in case this new
 		 * size is not block aligned since we will be keeping the last
@@ -8434,8 +8414,6 @@ static int btrfs_truncate(struct btrfs_inode *inode, bool skip_writeback)
 
 		inode_sub_bytes(&inode->vfs_inode, control.sub_bytes);
 		btrfs_inode_safe_disk_i_size_write(inode, control.last_size);
-
-		unlock_extent(&inode->io_tree, lock_start, (u64)-1, &cached_state);
 
 		trans->block_rsv = &fs_info->trans_block_rsv;
 		if (ret != -ENOSPC && ret != -EAGAIN)

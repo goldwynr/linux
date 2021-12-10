@@ -2180,10 +2180,10 @@ static void btrfs_punch_hole_lock_range(struct inode *inode,
 	const u64 page_lockend = round_down(lockend + 1, PAGE_SIZE) - 1;
 
 	while (1) {
-		truncate_pagecache_range(inode, lockstart, lockend);
+		btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), lockstart,
+				lockend, cached_state);
 
-		lock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend,
-			    cached_state);
+		truncate_pagecache_range(inode, lockstart, lockend);
 		/*
 		 * We can't have ordered extents in the range, nor dirty/writeback
 		 * pages, because we have locked the inode's VFS lock in exclusive
