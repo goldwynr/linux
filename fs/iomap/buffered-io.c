@@ -2078,14 +2078,14 @@ unlock:
 }
 
 int
-iomap_writepages(struct address_space *mapping, struct writeback_control *wbc,
+iomap_writepages(struct address_space *mapping,
 		struct iomap_writepage_ctx *wpc,
 		const struct iomap_writeback_ops *ops)
 {
 	int			ret;
 
 	wpc->ops = ops;
-	ret = write_cache_pages(mapping, wbc, iomap_do_writepage, wpc);
+	ret = write_cache_pages(mapping, wpc->wbc, iomap_do_writepage, wpc);
 	if (!wpc->ioend)
 		return ret;
 	return iomap_submit_ioend(wpc, wpc->ioend, ret);

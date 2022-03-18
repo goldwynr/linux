@@ -500,7 +500,11 @@ xfs_vm_writepages(
 	struct address_space	*mapping,
 	struct writeback_control *wbc)
 {
-	struct xfs_writepage_ctx wpc = { };
+	struct xfs_writepage_ctx wpc = {
+		.ctx = {
+			.wbc	= wbc,
+		},
+	};
 
 	/*
 	 * Writing back data in a transaction context can result in recursive
@@ -510,7 +514,7 @@ xfs_vm_writepages(
 		return 0;
 
 	xfs_iflags_clear(XFS_I(mapping->host), XFS_ITRUNCATED);
-	return iomap_writepages(mapping, wbc, &wpc.ctx, &xfs_writeback_ops);
+	return iomap_writepages(mapping, &wpc.ctx, &xfs_writeback_ops);
 }
 
 STATIC int
