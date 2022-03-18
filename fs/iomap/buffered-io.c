@@ -2061,7 +2061,7 @@ static int iomap_do_writepage(struct folio *folio,
 }
 
 int
-iomap_writepages(struct address_space *mapping, struct writeback_control *wbc,
+iomap_writepages(struct address_space *mapping,
 		struct iomap_writepage_ctx *wpc,
 		const struct iomap_writeback_ops *ops)
 {
@@ -2076,7 +2076,7 @@ iomap_writepages(struct address_space *mapping, struct writeback_control *wbc,
 		return -EIO;
 
 	wpc->ops = ops;
-	ret = write_cache_pages(mapping, wbc, iomap_do_writepage, wpc);
+	ret = write_cache_pages(mapping, wpc->wbc, iomap_do_writepage, wpc);
 	return iomap_submit_ioend(wpc, ret);
 }
 EXPORT_SYMBOL_GPL(iomap_writepages);
