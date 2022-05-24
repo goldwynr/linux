@@ -339,9 +339,9 @@ int btrfs_truncate_free_space_cache(struct btrfs_trans_handle *trans,
 	}
 
 	btrfs_i_size_write(inode, 0);
-	truncate_pagecache(vfs_inode, 0);
 
 	lock_extent(&inode->io_tree, 0, (u64)-1, &cached_state);
+	truncate_pagecache(vfs_inode, 0);
 	btrfs_drop_extent_map_range(inode, 0, (u64)-1, false);
 
 	/*

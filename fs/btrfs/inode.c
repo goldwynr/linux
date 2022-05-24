@@ -1339,7 +1339,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 			 */
 			extent_clear_unlock_delalloc(inode, start, end,
 				     locked_page,
-				     EXTENT_LOCKED | EXTENT_DELALLOC |
+				     EXTENT_DELALLOC |
 				     EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
 				     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
 				     PAGE_START_WRITEBACK | PAGE_END_WRITEBACK);
@@ -1478,7 +1478,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 
 		extent_clear_unlock_delalloc(inode, start, start + ram_size - 1,
 					     locked_page,
-					     EXTENT_LOCKED | EXTENT_DELALLOC,
+					     EXTENT_DELALLOC,
 					     page_ops);
 		if (num_bytes < cur_alloc_size)
 			num_bytes = 0;
@@ -1516,7 +1516,7 @@ out_unlock:
 	 * We process each region below.
 	 */
 
-	clear_bits = EXTENT_LOCKED | EXTENT_DELALLOC | EXTENT_DELALLOC_NEW |
+	clear_bits = EXTENT_DELALLOC | EXTENT_DELALLOC_NEW |
 		EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV;
 	page_ops = PAGE_UNLOCK | PAGE_START_WRITEBACK | PAGE_END_WRITEBACK;
 
@@ -2193,7 +2193,7 @@ must_cow:
 		btrfs_put_ordered_extent(ordered);
 
 		extent_clear_unlock_delalloc(inode, cur_offset, nocow_end,
-					     locked_page, EXTENT_LOCKED |
+					     locked_page,
 					     EXTENT_DELALLOC |
 					     EXTENT_CLEAR_DATA_RESV,
 					     PAGE_UNLOCK | PAGE_SET_ORDERED);
@@ -2236,7 +2236,7 @@ error:
 		cur_offset = cow_start;
 	if (cur_offset < end)
 		extent_clear_unlock_delalloc(inode, cur_offset, end,
-					     locked_page, EXTENT_LOCKED |
+					     locked_page,
 					     EXTENT_DELALLOC | EXTENT_DEFRAG |
 					     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
 					     PAGE_START_WRITEBACK |
@@ -7911,7 +7911,35 @@ static int btrfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 static int btrfs_writepages(struct address_space *mapping,
 			    struct writeback_control *wbc)
 {
-	return extent_writepages(mapping, wbc);
+	u64 start = 0, end = LLONG_MAX;
+	struct inode *inode = mapping->host;
+	struct extent_state *cached = NULL;
+	int ret;
+	loff_t isize = i_size_read(inode);
+	int saved_range_cyclic = wbc->range_cyclic;
+
+	if (saved_range_cyclic) {
+		start = mapping->writeback_index << PAGE_SHIFT;
+		end = round_up(isize, PAGE_SIZE) - 1;
+		wbc->range_cyclic = 0;
+		wbc->range_start = start;
+		wbc->range_end = end;
+	} else {
+		start = round_down(wbc->range_start, PAGE_SIZE);
+		end = round_up(wbc->range_end, PAGE_SIZE) - 1;
+	}
+
+	if (start >= end || isize == 0)
+		return 0;
+
+	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+	ret = extent_writepages(mapping, wbc);
+	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+
+	if (saved_range_cyclic)
+		wbc->range_cyclic = 1;
+
+	return ret;
 }
 
 static void btrfs_readahead(struct readahead_control *rac)
