@@ -526,9 +526,6 @@ static void endio_readpage_release_extent(struct processed_extent *processed,
 			      struct btrfs_inode *inode, u64 start, u64 end,
 			      bool uptodate)
 {
-	struct extent_state *cached = NULL;
-	struct extent_io_tree *tree;
-
 	/* The first extent, initialize @processed */
 	if (!processed->inode)
 		goto update;
@@ -549,13 +546,6 @@ static void endio_readpage_release_extent(struct processed_extent *processed,
 		processed->end = end;
 		return;
 	}
-
-	tree = &processed->inode->io_tree;
-	/*
-	 * Now we don't have range contiguous to the processed range, release
-	 * the processed range now.
-	 */
-	unlock_extent(tree, processed->start, processed->end, &cached);
 
 update:
 	/* Update processed to current range */
@@ -1015,11 +1005,9 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 	size_t pg_offset = 0;
 	size_t iosize;
 	size_t blocksize = fs_info->sectorsize;
-	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
 
 	ret = set_page_extent_mapped(page);
 	if (ret < 0) {
-		unlock_extent(tree, start, end, NULL);
 		unlock_page(page);
 		return ret;
 	}
@@ -1043,13 +1031,11 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 		if (cur >= last_byte) {
 			iosize = PAGE_SIZE - pg_offset;
 			memzero_page(page, pg_offset, iosize);
-			unlock_extent(tree, cur, cur + iosize - 1, NULL);
 			end_page_read(page, true, cur, iosize);
 			break;
 		}
 		em = __get_extent_map(inode, page, cur, end - cur + 1, em_cached);
 		if (IS_ERR(em)) {
-			unlock_extent(tree, cur, end, NULL);
 			end_page_read(page, false, cur, end + 1 - cur);
 			return PTR_ERR(em);
 		}
@@ -1117,8 +1103,6 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 		/* we've found a hole, just zero and go on */
 		if (block_start == EXTENT_MAP_HOLE) {
 			memzero_page(page, pg_offset, iosize);
-
-			unlock_extent(tree, cur, cur + iosize - 1, NULL);
 			end_page_read(page, true, cur, iosize);
 			cur = cur + iosize;
 			pg_offset += iosize;
@@ -1126,7 +1110,6 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 		}
 		/* the get_extent function already copied into the page */
 		if (block_start == EXTENT_MAP_INLINE) {
-			unlock_extent(tree, cur, cur + iosize - 1, NULL);
 			end_page_read(page, true, cur, iosize);
 			cur = cur + iosize;
 			pg_offset += iosize;
@@ -1152,14 +1135,10 @@ static int btrfs_do_readpage(struct page *page, struct extent_map **em_cached,
 int btrfs_read_folio(struct file *file, struct folio *folio)
 {
 	struct page *page = &folio->page;
-	struct btrfs_inode *inode = page_to_inode(page);
-	u64 start = page_offset(page);
-	u64 end = start + PAGE_SIZE - 1;
 	struct btrfs_bio_ctrl bio_ctrl = { .opf = REQ_OP_READ };
 	struct extent_map *em_cached = NULL;
 	int ret;
 
-	btrfs_lock_and_flush_ordered_range(inode, start, end, NULL);
 
 	ret = btrfs_do_readpage(page, &em_cached, &bio_ctrl, NULL);
 	free_extent_map(em_cached);
@@ -1178,12 +1157,9 @@ static inline void contiguous_readpages(struct page *pages[], int nr_pages,
 					struct btrfs_bio_ctrl *bio_ctrl,
 					u64 *prev_em_start)
 {
-	struct btrfs_inode *inode = page_to_inode(pages[0]);
 	int index;
 
 	ASSERT(em_cached);
-
-	btrfs_lock_and_flush_ordered_range(inode, start, end, NULL);
 
 	for (index = 0; index < nr_pages; index++) {
 		btrfs_do_readpage(pages[index], em_cached, bio_ctrl,
