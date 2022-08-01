@@ -1989,8 +1989,25 @@ out_release_extents:
 	goto out;
 }
 
+static vm_fault_t btrfs_fault(struct vm_fault *vmf)
+{
+	struct extent_state *cached_state = NULL;
+	struct inode *inode = file_inode(vmf->vma->vm_file);
+	u64 page_start = (u64)vmf->pgoff << PAGE_SHIFT;
+	u64 page_end = page_start + PAGE_SIZE - 1;
+	vm_fault_t ret;
+
+	btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), page_start, page_end,
+			&cached_state);
+	ret = filemap_fault(vmf);
+	unlock_extent(&BTRFS_I(inode)->io_tree, page_start, page_end,
+			&cached_state);
+
+	return ret;
+}
+
 static const struct vm_operations_struct btrfs_file_vm_ops = {
-	.fault		= filemap_fault,
+	.fault		= btrfs_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= btrfs_page_mkwrite,
 };

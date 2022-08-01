@@ -8205,8 +8205,6 @@ vm_fault_t btrfs_page_mkwrite(struct vm_fault *vmf)
 	struct folio *folio = page_folio(page);
 	struct inode *inode = file_inode(vmf->vma->vm_file);
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-	struct extent_io_tree *io_tree = &BTRFS_I(inode)->io_tree;
-	struct btrfs_ordered_extent *ordered;
 	struct extent_state *cached_state = NULL;
 	struct extent_changeset *data_reserved = NULL;
 	unsigned long zero_start;
@@ -8250,7 +8248,6 @@ vm_fault_t btrfs_page_mkwrite(struct vm_fault *vmf)
 	}
 
 	ret = VM_FAULT_NOPAGE; /* make the VM retry the fault */
-again:
 	down_read(&BTRFS_I(inode)->i_mmap_lock);
 	lock_page(page);
 	size = i_size_read(inode);
@@ -8262,27 +8259,10 @@ again:
 	}
 	wait_on_page_writeback(page);
 
-	lock_extent(io_tree, page_start, page_end, &cached_state);
 	ret2 = set_page_extent_mapped(page);
 	if (ret2 < 0) {
 		ret = vmf_error(ret2);
-		unlock_extent(io_tree, page_start, page_end, &cached_state);
 		goto out_unlock;
-	}
-
-	/*
-	 * we can't set the delalloc bits if there are pending ordered
-	 * extents.  Drop our locks and wait for them to finish
-	 */
-	ordered = btrfs_lookup_ordered_range(BTRFS_I(inode), page_start,
-			PAGE_SIZE);
-	if (ordered) {
-		unlock_extent(io_tree, page_start, page_end, &cached_state);
-		unlock_page(page);
-		up_read(&BTRFS_I(inode)->i_mmap_lock);
-		btrfs_start_ordered_extent(ordered);
-		btrfs_put_ordered_extent(ordered);
-		goto again;
 	}
 
 	if (page->index == ((size - 1) >> PAGE_SHIFT)) {
@@ -8310,7 +8290,6 @@ again:
 	ret2 = btrfs_set_extent_delalloc(BTRFS_I(inode), page_start, end, 0,
 					&cached_state);
 	if (ret2) {
-		unlock_extent(io_tree, page_start, page_end, &cached_state);
 		ret = VM_FAULT_SIGBUS;
 		goto out_unlock;
 	}
@@ -8330,7 +8309,6 @@ again:
 
 	btrfs_set_inode_last_sub_trans(BTRFS_I(inode));
 
-	unlock_extent(io_tree, page_start, page_end, &cached_state);
 	up_read(&BTRFS_I(inode)->i_mmap_lock);
 
 	btrfs_delalloc_release_extents(BTRFS_I(inode), PAGE_SIZE);
