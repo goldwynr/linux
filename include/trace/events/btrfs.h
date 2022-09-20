@@ -2083,12 +2083,14 @@ DEFINE_EVENT(btrfs__block_group, btrfs_skip_unused_block_group,
 
 TRACE_EVENT(btrfs_set_extent_bit,
 	TP_PROTO(const struct extent_io_tree *tree,
+		const char *func,
 		 u64 start, u64 len, unsigned set_bits),
 
-	TP_ARGS(tree, start, len, set_bits),
+	TP_ARGS(tree, func, start, len, set_bits),
 
 	TP_STRUCT__entry_btrfs(
 		__field(	unsigned,	owner	)
+		__string(	func,		func	)
 		__field(	u64,		ino	)
 		__field(	u64,		rootid	)
 		__field(	u64,		start	)
@@ -2102,26 +2104,29 @@ TRACE_EVENT(btrfs_set_extent_bit,
 		__entry->owner		= tree->owner;
 		__entry->ino		= inode ? btrfs_ino(inode) : 0;
 		__entry->rootid		= inode ? inode->root->root_key.objectid : 0;
+		__assign_str(func, func);
 		__entry->start		= start;
 		__entry->len		= len;
 		__entry->set_bits	= set_bits;
 	),
 
 	TP_printk_btrfs(
-		"io_tree=%s ino=%llu root=%llu start=%llu len=%llu set_bits=%s",
-		__print_symbolic(__entry->owner, IO_TREE_OWNER), __entry->ino,
+		"io_tree=%s func=%s ino=%llu root=%llu start=%llu len=%llu set_bits=%s",
+		__print_symbolic(__entry->owner, IO_TREE_OWNER), __get_str(func), __entry->ino,
 		__entry->rootid, __entry->start, __entry->len,
 		__print_flags(__entry->set_bits, "|", EXTENT_FLAGS))
 );
 
 TRACE_EVENT(btrfs_clear_extent_bit,
 	TP_PROTO(const struct extent_io_tree *tree,
+		const char *func,
 		 u64 start, u64 len, unsigned clear_bits),
 
-	TP_ARGS(tree, start, len, clear_bits),
+	TP_ARGS(tree, func, start, len, clear_bits),
 
 	TP_STRUCT__entry_btrfs(
 		__field(	unsigned,	owner	)
+		__string(	func,		func	)
 		__field(	u64,		ino	)
 		__field(	u64,		rootid	)
 		__field(	u64,		start	)
@@ -2135,14 +2140,15 @@ TRACE_EVENT(btrfs_clear_extent_bit,
 		__entry->owner		= tree->owner;
 		__entry->ino		= inode ? btrfs_ino(inode) : 0;
 		__entry->rootid		= inode ? inode->root->root_key.objectid : 0;
+		__assign_str(func, func)
 		__entry->start		= start;
 		__entry->len		= len;
 		__entry->clear_bits	= clear_bits;
 	),
 
 	TP_printk_btrfs(
-		"io_tree=%s ino=%llu root=%llu start=%llu len=%llu clear_bits=%s",
-		__print_symbolic(__entry->owner, IO_TREE_OWNER), __entry->ino,
+		"io_tree=%s func=%s ino=%llu root=%llu start=%llu len=%llu clear_bits=%s",
+		__print_symbolic(__entry->owner, IO_TREE_OWNER), __get_str(func), __entry->ino,
 		__entry->rootid, __entry->start, __entry->len,
 		__print_flags(__entry->clear_bits, "|", EXTENT_FLAGS))
 );
