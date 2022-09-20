@@ -1104,7 +1104,7 @@ static int try_release_extent_state(struct extent_io_tree *tree,
 	 * The delalloc new bit will be cleared by ordered extent
 	 * completion.
 	 */
-	ret = __clear_extent_bit(tree, start, end, clear_bits, NULL, NULL);
+	ret = __clear_extent_bit(tree, __func__, start, end, clear_bits, NULL, NULL);
 
 	/* if clear_extent_bit failed for enomem reasons,
 	 * we can't allow the release to continue.
@@ -3772,6 +3772,7 @@ int try_release_extent_buffer(struct page *page)
 {
 	struct folio *folio = page_folio(page);
 	struct extent_buffer *eb;
+	int ret;
 
 	if (page_to_fs_info(page)->nodesize < PAGE_SIZE)
 		return try_release_subpage_extent_buffer(page);
@@ -3811,7 +3812,8 @@ int try_release_extent_buffer(struct page *page)
 		return 0;
 	}
 
-	return release_extent_buffer(eb);
+	ret = release_extent_buffer(eb);
+	return ret;
 }
 
 /*

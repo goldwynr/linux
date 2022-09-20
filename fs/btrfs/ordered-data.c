@@ -1076,7 +1076,7 @@ out:
  * Always return with the given range locked, ensuring after it's called no
  * order extent can be pending.
  */
-void btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, u64 start,
+void __btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, const char *func, u64 start,
 					u64 end,
 					struct extent_state **cached_state)
 {
@@ -1088,7 +1088,7 @@ void btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, u64 start,
 		cachedp = cached_state;
 
 	while (1) {
-		lock_extent(&inode->io_tree, start, end, cachedp);
+		__lock_extent(&inode->io_tree, func, start, end, cachedp);
 		ordered = btrfs_lookup_ordered_range(inode, start,
 						     end - start + 1);
 		if (!ordered) {

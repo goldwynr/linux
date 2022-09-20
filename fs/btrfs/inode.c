@@ -7776,7 +7776,7 @@ static int btrfs_writepages(struct address_space *mapping,
 	saved_start = start;
 
 	do {
-		lock_extent_best_effort(&BTRFS_I(inode)->io_tree, start, saved_end, &end, PAGE_SIZE, &cached);
+		lock_extent_best_effort(&BTRFS_I(inode)->io_tree, __func__, start, saved_end, &end, PAGE_SIZE, &cached);
 		wbc->range_end = end;
 
 		/*

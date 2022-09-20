@@ -135,14 +135,17 @@ void extent_io_tree_init(struct btrfs_fs_info *fs_info,
 			 struct extent_io_tree *tree, unsigned int owner);
 void extent_io_tree_release(struct extent_io_tree *tree);
 
-int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+int __lock_extent(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		struct extent_state **cached);
-int lock_extent_best_effort(struct extent_io_tree *tree, u64 start, u64 end,
+int lock_extent_best_effort(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		u64 *locked_until, size_t min_size,
 		struct extent_state **cached);
 
-int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+int __try_lock_extent(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		    struct extent_state **cached);
+
+#define lock_extent(t, s, e, c) __lock_extent(t, __func__, s, e, c)
+#define try_lock_extent(t, s, e, c) __try_lock_extent(t, __func__, s, e, c)
 
 int __init extent_state_init_cachep(void);
 void __cold extent_state_free_cachep(void);
@@ -158,22 +161,27 @@ bool test_range_bit(struct extent_io_tree *tree, u64 start, u64 end, u32 bit,
 bool test_range_bit_exists(struct extent_io_tree *tree, u64 start, u64 end, u32 bit);
 int clear_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 			     u32 bits, struct extent_changeset *changeset);
-int __clear_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
+int __clear_extent_bit(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		       u32 bits, struct extent_state **cached,
 		       struct extent_changeset *changeset);
 
-static inline int clear_extent_bit(struct extent_io_tree *tree, u64 start,
-				   u64 end, u32 bits,
-				   struct extent_state **cached)
-{
-	return __clear_extent_bit(tree, start, end, bits, cached, NULL);
-}
+#define clear_extent_bit(t, s, e, b, c) __clear_extent_bit(t, __func__, s, e, b, c, NULL)
 
-static inline int unlock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+static inline int __unlock_extent(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 				struct extent_state **cached)
 {
-	return __clear_extent_bit(tree, start, end, EXTENT_LOCKED, cached, NULL);
+	return __clear_extent_bit(tree, func, start, end, EXTENT_LOCKED, cached, NULL);
 }
+
+static inline int __unlock_extent_atomic(struct extent_io_tree *tree, const char *func, u64 start,
+				       u64 end, struct extent_state **cached)
+{
+	return __clear_extent_bit(tree, func, start, end, EXTENT_LOCKED, cached, NULL);
+}
+
+#define unlock_extent(t, s, e, c) __unlock_extent(t, __func__, s, e, c)
+#define unlock_extent_atomic(t, s, e, c) __unlock_extent_atomic(t, __func__, s, e, c)
+
 
 static inline int clear_extent_bits(struct extent_io_tree *tree, u64 start,
 				    u64 end, u32 bits)
@@ -183,13 +191,18 @@ static inline int clear_extent_bits(struct extent_io_tree *tree, u64 start,
 
 int set_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 			   u32 bits, struct extent_changeset *changeset);
-int set_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
-		   u32 bits, struct extent_state **cached_state);
+
+int __set_extent_bit(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
+                            u32 bits, u64 *failed_start,
+                            struct extent_state **failed_state,
+                            struct extent_state **cached_state,
+                            struct extent_changeset *changeset);
+#define set_extent_bit(t, s, e, b, c) __set_extent_bit(t, __func__, s, e, b, NULL, NULL, c, NULL)
 
 static inline int clear_extent_uptodate(struct extent_io_tree *tree, u64 start,
 		u64 end, struct extent_state **cached_state)
 {
-	return __clear_extent_bit(tree, start, end, EXTENT_UPTODATE,
+	return __clear_extent_bit(tree, __func__, start, end, EXTENT_UPTODATE,
 				  cached_state, NULL);
 }
 

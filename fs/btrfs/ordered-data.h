@@ -196,9 +196,10 @@ u64 btrfs_wait_ordered_extents(struct btrfs_root *root, u64 nr,
 			       const u64 range_start, const u64 range_len);
 void btrfs_wait_ordered_roots(struct btrfs_fs_info *fs_info, u64 nr,
 			      const u64 range_start, const u64 range_len);
-void btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, u64 start,
+void __btrfs_lock_and_flush_ordered_range(struct btrfs_inode *inode, const char *func, u64 start,
 					u64 end,
 					struct extent_state **cached_state);
+#define btrfs_lock_and_flush_ordered_range(i, s, e, c) __btrfs_lock_and_flush_ordered_range(i, __func__, s, e, c)
 bool btrfs_try_lock_ordered_range(struct btrfs_inode *inode, u64 start, u64 end,
 				  struct extent_state **cached_state);
 struct btrfs_ordered_extent *btrfs_split_ordered_extent(

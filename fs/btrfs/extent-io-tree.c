@@ -622,7 +622,7 @@ static void set_gfp_mask_from_bits(u32 *bits, gfp_t *mask)
  *
  * This takes the tree lock, and returns 0 on success and < 0 on error.
  */
-int __clear_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
+int __clear_extent_bit(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		       u32 bits, struct extent_state **cached_state,
 		       struct extent_changeset *changeset)
 {
@@ -638,7 +638,7 @@ int __clear_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
 
 	set_gfp_mask_from_bits(&bits, &mask);
 	btrfs_debug_check_extent_io_range(tree, start, end);
-	trace_btrfs_clear_extent_bit(tree, start, end - start + 1, bits);
+	trace_btrfs_clear_extent_bit(tree, func, start, end - start + 1, bits);
 
 	if (delete)
 		bits |= ~EXTENT_CTLBITS;
@@ -1049,7 +1049,7 @@ out:
  *
  * [start, end] is inclusive This takes the tree lock.
  */
-static int __set_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
+int __set_extent_bit(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 			    u32 bits, u64 *failed_start,
 			    struct extent_state **failed_state,
 			    struct extent_state **cached_state,
@@ -1067,7 +1067,7 @@ static int __set_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
 
 	set_gfp_mask_from_bits(&bits, &mask);
 	btrfs_debug_check_extent_io_range(tree, start, end);
-	trace_btrfs_set_extent_bit(tree, start, end - start + 1, bits);
+	trace_btrfs_set_extent_bit(tree, func, start, end - start + 1, bits);
 
 	if (exclusive_bits)
 		ASSERT(failed_start);
@@ -1277,13 +1277,6 @@ out:
 
 	return err;
 
-}
-
-int set_extent_bit(struct extent_io_tree *tree, u64 start, u64 end,
-		   u32 bits, struct extent_state **cached_state)
-{
-	return __set_extent_bit(tree, start, end, bits, NULL, NULL,
-				cached_state, NULL);
 }
 
 /*
@@ -1815,7 +1808,7 @@ int set_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 	 */
 	ASSERT(!(bits & EXTENT_LOCKED));
 
-	return __set_extent_bit(tree, start, end, bits, NULL, NULL, NULL, changeset);
+	return __set_extent_bit(tree, __func__, start, end, bits, NULL, NULL, NULL, changeset);
 }
 
 int clear_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
@@ -1827,17 +1820,17 @@ int clear_record_extent_bits(struct extent_io_tree *tree, u64 start, u64 end,
 	 */
 	ASSERT(!(bits & EXTENT_LOCKED));
 
-	return __clear_extent_bit(tree, start, end, bits, NULL, changeset);
+	return __clear_extent_bit(tree, __func__, start, end, bits, NULL, changeset);
 }
 
-int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+int __try_lock_extent(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		    struct extent_state **cached)
 {
 	int err;
 	u64 failed_start;
 
 	WARN_ON(start > end);
-	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
+	err = __set_extent_bit(tree, func, start, end, EXTENT_LOCKED, &failed_start,
 			       NULL, cached, NULL);
 	if (err == -EEXIST) {
 		if (failed_start > start)
@@ -1852,7 +1845,7 @@ int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
  * Either insert or lock state struct between start and end use mask to tell
  * us if waiting is desired.
  */
-int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
+int __lock_extent(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		struct extent_state **cached_state)
 {
 	struct extent_state *failed_state = NULL;
@@ -1860,7 +1853,7 @@ int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 	u64 failed_start;
 
 	WARN_ON(start > end);
-	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
+	err = __set_extent_bit(tree, func, start, end, EXTENT_LOCKED, &failed_start,
 			       &failed_state, cached_state, NULL);
 	while (err == -EEXIST) {
 		if (failed_start != start)
@@ -1869,7 +1862,7 @@ int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 
 		wait_extent_bit(tree, failed_start, end, EXTENT_LOCKED,
 				&failed_state);
-		err = __set_extent_bit(tree, start, end, EXTENT_LOCKED,
+		err = __set_extent_bit(tree, func, start, end, EXTENT_LOCKED,
 				       &failed_start, &failed_state,
 				       cached_state, NULL);
 	}
@@ -1880,7 +1873,7 @@ int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
  * Either insert or lock state struct between start and end use mask to tell
  * us if waiting is desired.
  */
-int lock_extent_best_effort(struct extent_io_tree *tree, u64 start, u64 end,
+int lock_extent_best_effort(struct extent_io_tree *tree, const char *func, u64 start, u64 end,
 		u64 *locked_end, size_t min_size,
 		struct extent_state **cached_state)
 {
@@ -1890,7 +1883,7 @@ int lock_extent_best_effort(struct extent_io_tree *tree, u64 start, u64 end,
 
 	WARN_ON(start > end);
 again:
-	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
+	err = __set_extent_bit(tree, func, start, end, EXTENT_LOCKED, &failed_start,
 			       &failed_state, cached_state, NULL);
 	*locked_end = end;
 	if (err == -EEXIST) {
