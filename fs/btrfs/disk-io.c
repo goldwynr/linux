@@ -497,7 +497,24 @@ static int btree_migrate_folio(struct address_space *mapping,
 static int btree_writepages(struct address_space *mapping,
 			    struct writeback_control *wbc)
 {
+	u64 start, end;
+	struct btrfs_inode *inode = BTRFS_I(mapping->host);
+	struct extent_state *cached = NULL;
 	int ret;
+	u64 isize = round_up(i_size_read(&inode->vfs_inode), PAGE_SIZE) - 1;
+
+	if (wbc->range_cyclic) {
+		start = mapping->writeback_index << PAGE_SHIFT;
+		end = isize;
+	} else {
+		start = round_down(wbc->range_start, PAGE_SIZE);
+		end = round_up(wbc->range_end, PAGE_SIZE) - 1;
+		end = min(isize, end);
+	}
+
+	if (start >= end)
+		return 0;
+
 
 	if (wbc->sync_mode == WB_SYNC_NONE) {
 		struct btrfs_fs_info *fs_info;
@@ -513,7 +530,12 @@ static int btree_writepages(struct address_space *mapping,
 		if (ret < 0)
 			return 0;
 	}
-	return btree_write_cache_pages(mapping, wbc);
+
+	lock_extent(&inode->io_tree, start, end, &cached);
+	ret = btree_write_cache_pages(mapping, wbc);
+	unlock_extent(&inode->io_tree, start, end, &cached);
+
+	return ret;
 }
 
 static bool btree_release_folio(struct folio *folio, gfp_t gfp_flags)
