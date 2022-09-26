@@ -2725,14 +2725,22 @@ static void btrfs_writepage_fixup_worker(struct btrfs_work *work)
 	u64 page_end = page_offset(page) + PAGE_SIZE - 1;
 	int ret = 0;
 	bool free_delalloc_space = true;
+	bool flushed = false;
 
 	/*
 	 * This is similar to page_mkwrite, we need to reserve the space before
 	 * we take the page lock.
 	 */
+reserve:
 	ret = btrfs_delalloc_reserve_space(inode, &data_reserved, page_start,
 					   PAGE_SIZE);
+	if (ret == -EDQUOT && !flushed) {
+		btrfs_qgroup_flush(inode->root);
+		flushed = true;
+		goto reserve;
+	}
 again:
+	lock_extent(&inode->io_tree, page_start, page_end, NULL);
 	lock_page(page);
 
 	/*
@@ -2775,19 +2783,18 @@ again:
 	if (ret)
 		goto out_page;
 
-	lock_extent(&inode->io_tree, page_start, page_end, &cached_state);
-
 	/* already ordered? We're done */
 	if (PageOrdered(page))
 		goto out_reserved;
 
 	ordered = btrfs_lookup_ordered_range(inode, page_start, PAGE_SIZE);
 	if (ordered) {
-		unlock_extent(&inode->io_tree, page_start, page_end,
-			      &cached_state);
 		unlock_page(page);
+		unlock_extent(&inode->io_tree, page_start, page_end,
+			      NULL);
 		btrfs_start_ordered_extent(ordered);
 		btrfs_put_ordered_extent(ordered);
+
 		goto again;
 	}
 
@@ -2810,7 +2817,6 @@ out_reserved:
 	if (free_delalloc_space)
 		btrfs_delalloc_release_space(inode, data_reserved, page_start,
 					     PAGE_SIZE, true);
-	unlock_extent(&inode->io_tree, page_start, page_end, &cached_state);
 out_page:
 	if (ret) {
 		/*
