@@ -10372,6 +10372,29 @@ ssize_t btrfs_do_encoded_write(struct kiocb *iocb, struct iov_iter *from,
 	pages = kvcalloc(nr_pages, sizeof(struct page *), GFP_KERNEL_ACCOUNT);
 	if (!pages)
 		return -ENOMEM;
+
+	for (;;) {
+		struct btrfs_ordered_extent *ordered;
+
+		ret = btrfs_wait_ordered_range(&inode->vfs_inode, start, num_bytes);
+		if (ret)
+			goto out;
+		ret = invalidate_inode_pages2_range(inode->vfs_inode.i_mapping,
+						    start >> PAGE_SHIFT,
+						    end >> PAGE_SHIFT);
+		if (ret)
+			goto out;
+		lock_extent(io_tree, start, end, &cached_state);
+		ordered = btrfs_lookup_ordered_range(inode, start, num_bytes);
+		if (!ordered &&
+		    !filemap_range_has_page(inode->vfs_inode.i_mapping, start, end))
+			break;
+		if (ordered)
+			btrfs_put_ordered_extent(ordered);
+		unlock_extent(io_tree, start, end, &cached_state);
+		cond_resched();
+	}
+
 	for (i = 0; i < nr_pages; i++) {
 		size_t bytes = min_t(size_t, PAGE_SIZE, iov_iter_count(from));
 		char *kaddr;
@@ -10390,28 +10413,6 @@ ssize_t btrfs_do_encoded_write(struct kiocb *iocb, struct iov_iter *from,
 		if (bytes < PAGE_SIZE)
 			memset(kaddr + bytes, 0, PAGE_SIZE - bytes);
 		kunmap_local(kaddr);
-	}
-
-	for (;;) {
-		struct btrfs_ordered_extent *ordered;
-
-		ret = btrfs_wait_ordered_range(&inode->vfs_inode, start, num_bytes);
-		if (ret)
-			goto out_pages;
-		ret = invalidate_inode_pages2_range(inode->vfs_inode.i_mapping,
-						    start >> PAGE_SHIFT,
-						    end >> PAGE_SHIFT);
-		if (ret)
-			goto out_pages;
-		lock_extent(io_tree, start, end, &cached_state);
-		ordered = btrfs_lookup_ordered_range(inode, start, num_bytes);
-		if (!ordered &&
-		    !filemap_range_has_page(inode->vfs_inode.i_mapping, start, end))
-			break;
-		if (ordered)
-			btrfs_put_ordered_extent(ordered);
-		unlock_extent(io_tree, start, end, &cached_state);
-		cond_resched();
 	}
 
 	/*
@@ -10473,11 +10474,11 @@ ssize_t btrfs_do_encoded_write(struct kiocb *iocb, struct iov_iter *from,
 	if (start + encoded->len > inode->vfs_inode.i_size)
 		i_size_write(&inode->vfs_inode, start + encoded->len);
 
-	unlock_extent(io_tree, start, end, &cached_state);
-
 	btrfs_delalloc_release_extents(inode, num_bytes);
 
 	btrfs_submit_compressed_write(ordered, pages, nr_pages, 0, false);
+
+	unlock_extent(io_tree, start, end, &cached_state);
 	ret = orig_count;
 	goto out;
 
@@ -10497,14 +10498,14 @@ out_free_data_space:
 	 */
 	if (!extent_reserved)
 		btrfs_free_reserved_data_space_noquota(fs_info, disk_num_bytes);
-out_unlock:
-	unlock_extent(io_tree, start, end, &cached_state);
 out_pages:
 	for (i = 0; i < nr_pages; i++) {
 		if (pages[i])
 			__free_page(pages[i]);
 	}
 	kvfree(pages);
+out_unlock:
+	unlock_extent(io_tree, start, end, &cached_state);
 out:
 	if (ret >= 0)
 		iocb->ki_pos += encoded->len;
