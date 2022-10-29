@@ -864,9 +864,6 @@ static struct folio *defrag_prepare_one_folio(struct btrfs_inode *inode, pgoff_t
 {
 	struct address_space *mapping = inode->vfs_inode.i_mapping;
 	gfp_t mask = btrfs_alloc_write_mask(mapping);
-	u64 page_start = (u64)index << PAGE_SHIFT;
-	u64 page_end = page_start + PAGE_SIZE - 1;
-	struct extent_state *cached_state = NULL;
 	struct folio *folio;
 	int ret;
 
@@ -895,32 +892,6 @@ again:
 		folio_unlock(folio);
 		folio_put(folio);
 		return ERR_PTR(ret);
-	}
-
-	/* Wait for any existing ordered extent in the range */
-	while (1) {
-		struct btrfs_ordered_extent *ordered;
-
-		lock_extent(&inode->io_tree, page_start, page_end, &cached_state);
-		ordered = btrfs_lookup_ordered_range(inode, page_start, PAGE_SIZE);
-		unlock_extent(&inode->io_tree, page_start, page_end,
-			      &cached_state);
-		if (!ordered)
-			break;
-
-		folio_unlock(folio);
-		btrfs_start_ordered_extent(ordered);
-		btrfs_put_ordered_extent(ordered);
-		folio_lock(folio);
-		/*
-		 * We unlocked the folio above, so we need check if it was
-		 * released or not.
-		 */
-		if (folio->mapping != mapping || !folio->private) {
-			folio_unlock(folio);
-			folio_put(folio);
-			goto again;
-		}
 	}
 
 	/*
@@ -1220,6 +1191,11 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 	if (!folios)
 		return -ENOMEM;
 
+	/* Lock the pages range */
+	btrfs_lock_and_flush_ordered_range(inode, start_index << PAGE_SHIFT,
+		    (last_index << PAGE_SHIFT) + PAGE_SIZE - 1,
+		    &cached_state);
+
 	/* Prepare all pages */
 	for (i = 0; i < nr_pages; i++) {
 		folios[i] = defrag_prepare_one_folio(inode, start_index + i);
@@ -1232,10 +1208,6 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 	for (i = 0; i < nr_pages; i++)
 		folio_wait_writeback(folios[i]);
 
-	/* Lock the pages range */
-	lock_extent(&inode->io_tree, start_index << PAGE_SHIFT,
-		    (last_index << PAGE_SHIFT) + PAGE_SIZE - 1,
-		    &cached_state);
 	/*
 	 * Now we have a consistent view about the extent map, re-check
 	 * which range really needs to be defragged.
@@ -1247,7 +1219,7 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 				     newer_than, do_compress, true,
 				     &target_list, last_scanned_ret);
 	if (ret < 0)
-		goto unlock_extent;
+		goto free_folios;
 
 	list_for_each_entry(entry, &target_list, list) {
 		ret = defrag_one_locked_target(inode, entry, folios, nr_pages,
@@ -1260,16 +1232,15 @@ static int defrag_one_range(struct btrfs_inode *inode, u64 start, u32 len,
 		list_del_init(&entry->list);
 		kfree(entry);
 	}
-unlock_extent:
-	unlock_extent(&inode->io_tree, start_index << PAGE_SHIFT,
-		      (last_index << PAGE_SHIFT) + PAGE_SIZE - 1,
-		      &cached_state);
 free_folios:
 	for (i = 0; i < nr_pages; i++) {
 		folio_unlock(folios[i]);
 		folio_put(folios[i]);
 	}
 	kfree(folios);
+	unlock_extent(&inode->io_tree, start_index << PAGE_SHIFT,
+		      (last_index << PAGE_SHIFT) + PAGE_SIZE - 1,
+		      &cached_state);
 	return ret;
 }
 
