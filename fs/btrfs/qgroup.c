@@ -4063,7 +4063,7 @@ static int qgroup_unreserve_range(struct btrfs_inode *inode,
  *   In theory this shouldn't provide much space, but any more qgroup space
  *   is needed.
  */
-static int try_flush_qgroup(struct btrfs_root *root)
+int btrfs_qgroup_flush(struct btrfs_root *root)
 {
 	struct btrfs_trans_handle *trans;
 	int ret;
@@ -4177,7 +4177,7 @@ int btrfs_qgroup_reserve_data(struct btrfs_inode *inode,
 	if (ret <= 0 && ret != -EDQUOT)
 		return ret;
 
-	ret = try_flush_qgroup(inode->root);
+	ret = btrfs_qgroup_flush(inode->root);
 	if (ret < 0)
 		return ret;
 	return qgroup_reserve_data(inode, reserved_ret, start, len);
@@ -4397,7 +4397,7 @@ int __btrfs_qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
 	if ((ret <= 0 && ret != -EDQUOT) || noflush)
 		return ret;
 
-	ret = try_flush_qgroup(root);
+	ret = btrfs_qgroup_flush(root);
 	if (ret < 0)
 		return ret;
 	return btrfs_qgroup_reserve_meta(root, num_bytes, type, enforce);

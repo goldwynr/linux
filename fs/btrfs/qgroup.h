@@ -435,5 +435,6 @@ bool btrfs_check_quota_leak(struct btrfs_fs_info *fs_info);
 void btrfs_free_squota_rsv(struct btrfs_fs_info *fs_info, u64 root, u64 rsv_bytes);
 int btrfs_record_squota_delta(struct btrfs_fs_info *fs_info,
 			      struct btrfs_squota_delta *delta);
+int btrfs_qgroup_flush(struct btrfs_root *root);
 
 #endif
