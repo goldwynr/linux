@@ -37,6 +37,16 @@
 #include "file.h"
 #include "super.h"
 
+struct btrfs_iomap {
+
+	/* Locking */
+	u64 lockstart;
+	u64 lockend;
+	struct extent_state *cached_state;
+	int extents_locked;
+};
+
+
 /* simple helper to fault in pages and copy.  This should go away
  * and be replaced with calls into generic code.
  */
@@ -1174,6 +1184,7 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 	unsigned int ilock_flags = 0;
 	const bool nowait = (iocb->ki_flags & IOCB_NOWAIT);
 	unsigned int bdp_flags = (nowait ? BDP_ASYNC : 0);
+	struct btrfs_iomap *bi = NULL;
 
 	if (nowait)
 		ilock_flags |= BTRFS_ILOCK_TRY;
@@ -1201,6 +1212,12 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 		goto out;
 	}
 
+	bi = kzalloc(sizeof(struct btrfs_iomap), GFP_NOFS);
+	if (!bi) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
 	while (iov_iter_count(i) > 0) {
 		struct extent_state *cached_state = NULL;
 		size_t offset = offset_in_page(pos);
@@ -1214,7 +1231,6 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 		size_t copied;
 		size_t dirty_sectors;
 		size_t num_sectors;
-		int extents_locked;
 
 		/*
 		 * Fault pages before locking them in prepare_pages
@@ -1225,6 +1241,8 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 			break;
 		}
 
+		bi->extents_locked = false;
+		bi->cached_state = NULL;
 		only_release_metadata = false;
 		sector_offset = pos & (fs_info->sectorsize - 1);
 
@@ -1284,13 +1302,14 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 			break;
 		}
 
-		extents_locked = lock_and_cleanup_extent_if_need(BTRFS_I(inode),
+		ret = lock_and_cleanup_extent_if_need(BTRFS_I(inode),
 				pos, write_bytes, &lockstart, &lockend,
 				nowait, &cached_state);
-		if (extents_locked < 0) {
-			ret = extents_locked;
+		if (ret < 0) {
 			btrfs_delalloc_release_extents(BTRFS_I(inode), reserve_bytes);
 			break;
+		} else if (ret == 1) {
+			bi->extents_locked = true;
 		}
 
 
@@ -1354,8 +1373,10 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 
 		btrfs_delalloc_release_extents(BTRFS_I(inode), reserve_bytes);
 		btrfs_drop_pages(fs_info, pages, num_pages, pos, copied);
-		if (extents_locked)
-			unlock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend, &cached_state);
+		if (bi->extents_locked)
+			unlock_extent(&BTRFS_I(inode)->io_tree, bi->lockstart, bi->lockend, &bi->cached_state);
+		bi->extents_locked = false;
+
 		if (ret)
 			break;
 
@@ -1390,6 +1411,7 @@ static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 		iocb->ki_pos += num_written;
 	}
 out:
+	kfree(bi);
 	btrfs_inode_unlock(BTRFS_I(inode), ilock_flags);
 	return num_written ? num_written : ret;
 }
