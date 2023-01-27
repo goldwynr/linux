@@ -1005,7 +1005,7 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 	size_t sector_offset = pos & (fs_info->sectorsize - 1);
 	size_t len, write_bytes = length;
 	struct btrfs_iomap *bi;
-	bool nowait = false;
+	bool nowait = iomap->flags & IOMAP_NOWAIT;
 
 	bi = kzalloc(sizeof(struct btrfs_iomap), GFP_NOFS);
 	if (!bi)
