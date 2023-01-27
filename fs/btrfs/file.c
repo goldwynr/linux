@@ -36,6 +36,7 @@
 #include "ioctl.h"
 #include "file.h"
 #include "super.h"
+#include "volumes.h"
 
 struct btrfs_iomap {
 
@@ -856,128 +857,6 @@ out:
 }
 
 /*
- * on error we return an unlocked page and the error value
- * on success we return a locked page and 0
- */
-static int prepare_uptodate_page(struct inode *inode,
-				 struct page *page, u64 pos)
-{
-	struct folio *folio = page_folio(page);
-	int ret = 0;
-
-	if ((pos & (PAGE_SIZE - 1)) && !PageUptodate(page)) {
-		ret = btrfs_read_folio(NULL, folio);
-		if (ret)
-			return ret;
-		lock_page(page);
-		if (!PageUptodate(page)) {
-			unlock_page(page);
-			return -EIO;
-		}
-
-		/*
-		 * Since btrfs_read_folio() will unlock the folio before it
-		 * returns, there is a window where btrfs_release_folio() can be
-		 * called to release the page.  Here we check both inode
-		 * mapping and PagePrivate() to make sure the page was not
-		 * released.
-		 *
-		 * The private flag check is essential for subpage as we need
-		 * to store extra bitmap using folio private.
-		 */
-		if (page->mapping != inode->i_mapping || !folio_test_private(folio)) {
-			unlock_page(page);
-			return -EAGAIN;
-		}
-	}
-	return 0;
-}
-
-static fgf_t get_prepare_fgp_flags(bool nowait)
-{
-	fgf_t fgp_flags = FGP_LOCK | FGP_ACCESSED | FGP_CREAT;
-
-	if (nowait)
-		fgp_flags |= FGP_NOWAIT;
-
-	return fgp_flags;
-}
-
-static gfp_t get_prepare_gfp_flags(struct inode *inode, bool nowait)
-{
-	gfp_t gfp;
-
-	gfp = btrfs_alloc_write_mask(inode->i_mapping);
-	if (nowait) {
-		gfp &= ~__GFP_DIRECT_RECLAIM;
-		gfp |= GFP_NOWAIT;
-	}
-
-	return gfp;
-}
-
-/*
- * this just gets pages into the page cache and locks them down.
- */
-static noinline int prepare_pages(struct inode *inode, struct page **pages,
-				  size_t num_pages, loff_t pos,
-				  size_t write_bytes, bool nowait)
-{
-	int i;
-	unsigned long index = pos >> PAGE_SHIFT;
-	gfp_t mask = get_prepare_gfp_flags(inode, nowait);
-	fgf_t fgp_flags = get_prepare_fgp_flags(nowait);
-	int err = 0;
-	int faili;
-
-	for (i = 0; i < num_pages; i++) {
-again:
-		pages[i] = pagecache_get_page(inode->i_mapping, index + i,
-					      fgp_flags, mask | __GFP_WRITE);
-		if (!pages[i]) {
-			faili = i - 1;
-			if (nowait)
-				err = -EAGAIN;
-			else
-				err = -ENOMEM;
-			goto fail;
-		}
-
-		err = set_page_extent_mapped(pages[i]);
-		if (err < 0) {
-			faili = i;
-			goto fail;
-		}
-
-		if (i == 0)
-			err = prepare_uptodate_page(inode, pages[i], pos);
-		if (!err && i == num_pages - 1)
-			err = prepare_uptodate_page(inode, pages[i],
-						    pos + write_bytes);
-		if (err) {
-			put_page(pages[i]);
-			if (!nowait && err == -EAGAIN) {
-				err = 0;
-				goto again;
-			}
-			faili = i - 1;
-			goto fail;
-		}
-		wait_on_page_writeback(pages[i]);
-	}
-
-	return 0;
-fail:
-	while (faili >= 0) {
-		unlock_page(pages[faili]);
-		put_page(pages[faili]);
-		faili--;
-	}
-	return err;
-
-}
-
-/*
  * This function locks the extent and properly waits for data=ordered extents
  * to finish before allowing the pages to be modified if need.
  *
@@ -1197,13 +1076,19 @@ static void btrfs_iomap_release(struct btrfs_inode *inode,
 }
 
 static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
-		size_t length, struct btrfs_iomap *bi)
+		loff_t length, unsigned flags, struct iomap *iomap,
+		struct iomap *srcmap)
 {
 	int ret;
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	size_t sector_offset = pos & (fs_info->sectorsize - 1);
 	size_t len, write_bytes = length;
+	struct btrfs_iomap *bi;
 	bool nowait = false;
+
+	bi = kzalloc(sizeof(struct btrfs_iomap), GFP_NOFS);
+	if (!bi)
+		return -ENOMEM;
 
 	bi->extents_locked = false;
 	bi->cached_state = NULL;
@@ -1236,7 +1121,7 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 		if (can_nocow > 0)
 			ret = 0;
 		if (ret)
-			goto out;
+			return ret;
 		bi->metadata_only = true;
 	}
 
@@ -1268,15 +1153,27 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 		bi->extents_locked = true;
 		ret = 0;
 	}
-out:
+
+	iomap->private = bi;
+	iomap->length = round_up(write_bytes + sector_offset,
+			fs_info->sectorsize);
+	iomap->offset = round_down(pos, fs_info->sectorsize);
+	iomap->addr = IOMAP_NULL_ADDR;
+	iomap->type = IOMAP_DELALLOC;
+	iomap->bdev = fs_info->fs_devices->latest_dev->bdev;
+	iomap->folio_ops = &btrfs_iomap_folio_ops;
+
 	return ret;
 }
 
 static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
-		loff_t length, ssize_t written, struct btrfs_iomap *bi)
+		loff_t length, ssize_t written, unsigned flags,
+		struct iomap *iomap)
+
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	struct btrfs_inode *btrfs_inode = BTRFS_I(inode);
+	struct btrfs_iomap *bi = iomap->private;
 	loff_t block_start = round_down(pos, fs_info->sectorsize);
 	loff_t block_end = round_up(pos + written, fs_info->sectorsize) - 1;
 	size_t block_len = block_end + 1 - block_start;
@@ -1312,135 +1209,40 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
 	return ret;
 }
 
+static const struct iomap_ops btrfs_buffered_iomap_ops = {
+	.iomap_begin = btrfs_buffered_iomap_begin,
+	.iomap_end = btrfs_buffered_iomap_end,
+};
+
 static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
-					       struct iov_iter *i)
+                                               struct iov_iter *i)
 {
-	struct file *file = iocb->ki_filp;
-	loff_t pos = iocb->ki_pos;
-	struct inode *inode = file_inode(file);
-	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-	struct page **pages = NULL;
-	size_t num_written = 0;
-	int nrptrs;
-	int ret;
-	loff_t old_isize = i_size_read(inode);
-	unsigned int ilock_flags = 0;
-	const bool nowait = (iocb->ki_flags & IOCB_NOWAIT);
-	struct btrfs_iomap *bi = NULL;
-	size_t copied = 0;
+        struct file *file = iocb->ki_filp;
+        struct btrfs_inode *inode = BTRFS_I(file_inode(file));
+        size_t num_written = 0;
+        int ret;
+        unsigned int ilock_flags = 0;
 
-	if (nowait)
-		ilock_flags |= BTRFS_ILOCK_TRY;
+        if (iocb->ki_flags & IOCB_NOWAIT)
+                ilock_flags |= BTRFS_ILOCK_TRY;
 
-	ret = btrfs_inode_lock(BTRFS_I(inode), ilock_flags);
-	if (ret < 0)
-		return ret;
+        ret = btrfs_inode_lock(inode, ilock_flags);
+        if (ret < 0)
+                return ret;
 
-	ret = generic_write_checks(iocb, i);
-	if (ret <= 0)
-		goto out;
+        ret = generic_write_checks(iocb, i);
+        if (ret <= 0)
+                goto out;
 
-	ret = btrfs_write_check(iocb, i, ret);
-	if (ret < 0)
-		goto out;
+        ret = btrfs_write_check(iocb, i, ret);
+        if (ret < 0)
+                goto out;
 
-	pos = iocb->ki_pos;
-	nrptrs = min(DIV_ROUND_UP(iov_iter_count(i), PAGE_SIZE),
-			PAGE_SIZE / (sizeof(struct page *)));
-	nrptrs = min(nrptrs, current->nr_dirtied_pause - current->nr_dirtied);
-	nrptrs = max(nrptrs, 8);
-	pages = kmalloc_array(nrptrs, sizeof(struct page *), GFP_KERNEL);
-	if (!pages) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	bi = kzalloc(sizeof(struct btrfs_iomap), GFP_NOFS);
-	if (!bi) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	while (iov_iter_count(i) > 0) {
-		size_t offset = offset_in_page(pos);
-		size_t write_bytes = min(iov_iter_count(i),
-					 nrptrs * (size_t)PAGE_SIZE -
-					 offset);
-		size_t num_pages;
-		size_t dirty_pages;
-
-		/*
-		 * Fault pages before locking them in prepare_pages
-		 * to avoid recursive lock
-		 */
-		if (unlikely(fault_in_iov_iter_readable(i, write_bytes))) {
-			ret = -EFAULT;
-			break;
-		}
-
-		ret = btrfs_buffered_iomap_begin(inode, pos, write_bytes, bi);
-		if (ret < 0)
-			goto out;
-
-		num_pages = DIV_ROUND_UP(write_bytes + offset, PAGE_SIZE);
-		WARN_ON(num_pages > nrptrs);
-
-		/*
-		 * This is going to setup the pages array with the number of
-		 * pages we want, so we don't really need to worry about the
-		 * contents of pages from loop to loop
-		 */
-		ret = prepare_pages(inode, pages, num_pages,
-				    pos, write_bytes, false);
-		if (ret)
-			btrfs_delalloc_release_extents(BTRFS_I(inode),
-						       bi->reserved_bytes);
-
-		copied = btrfs_copy_from_user(pos, write_bytes, pages, i);
-
-		/*
-		 * if we have trouble faulting in the pages, fall
-		 * back to one page at a time
-		 */
-		if (copied < write_bytes)
-			nrptrs = 1;
-
-		if (copied == 0) {
-			dirty_pages = 0;
-		} else {
-			dirty_pages = DIV_ROUND_UP(copied + offset,
-						   PAGE_SIZE);
-		}
-
-		ret = btrfs_dirty_pages(BTRFS_I(inode), pages,
-					dirty_pages, pos, copied,
-					NULL, bi->metadata_only);
-
-		btrfs_buffered_iomap_end(inode, pos, write_bytes, copied, bi);
-
-		btrfs_drop_pages(fs_info, pages, num_pages, pos, copied);
-
-		if (ret)
-			break;
-
-		cond_resched();
-
-		pos += copied;
-		num_written += copied;
-	}
-
-	kfree(pages);
-
-	if (num_written > 0) {
-		pagecache_isize_extended(inode, old_isize, iocb->ki_pos);
-		iocb->ki_pos += num_written;
-	}
-
+        num_written = iomap_file_buffered_write(iocb, i,
+                                                &btrfs_buffered_iomap_ops);
 out:
-	btrfs_iomap_release(BTRFS_I(inode), pos, bi->reserved_bytes - copied,
-			bi);
-	btrfs_inode_unlock(BTRFS_I(inode), ilock_flags);
-	return num_written ? num_written : ret;
+        btrfs_inode_unlock(inode, ilock_flags);
+        return num_written ? num_written : ret;
 }
 
 static ssize_t check_direct_IO(struct btrfs_fs_info *fs_info,

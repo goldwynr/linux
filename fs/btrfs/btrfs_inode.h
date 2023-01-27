@@ -286,6 +286,8 @@ struct btrfs_inode {
 	struct inode vfs_inode;
 };
 
+extern const struct iomap_folio_ops btrfs_iomap_folio_ops;
+
 static inline u64 btrfs_get_first_dir_index_to_log(const struct btrfs_inode *inode)
 {
 	return READ_ONCE(inode->first_dir_index_to_log);

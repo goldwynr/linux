@@ -7206,7 +7206,7 @@ static void btrfs_put_folio(struct inode *inode, loff_t pos,
 	folio_put(folio);
 }
 
-static const struct iomap_folio_ops btrfs_iomap_folio_ops = {
+const struct iomap_folio_ops btrfs_iomap_folio_ops = {
 	.put_folio = btrfs_put_folio,
 };
 
