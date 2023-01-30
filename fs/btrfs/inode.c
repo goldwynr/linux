@@ -7897,6 +7897,29 @@ out:
 	return ret;
 }
 
+static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
+		loff_t length, unsigned int flags, struct iomap *iomap,
+		struct iomap *srcmap)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	struct extent_map *em;
+	u64 start = round_down(pos, fs_info->sectorsize);
+	u64 end = round_up(pos + length, fs_info->sectorsize) - 1;
+
+	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1);
+	if (IS_ERR(em))
+		return PTR_ERR(em);
+
+	btrfs_em_to_iomap(inode, em, iomap, start, false);
+	free_extent_map(em);
+
+	return 0;
+}
+
+static const struct iomap_ops btrfs_buffered_read_iomap_ops = {
+	.iomap_begin = btrfs_read_iomap_begin,
+};
+
 static void btrfs_readahead(struct readahead_control *rac)
 {
 	extent_readahead(rac);
