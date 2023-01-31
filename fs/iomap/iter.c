@@ -29,7 +29,8 @@ static inline int iomap_iter_advance(struct iomap_iter *iter)
 			return iter->processed;
 		if (!iter->processed && !stale)
 			return 0;
-		if (WARN_ON_ONCE(iter->processed > iomap_length(iter)))
+		if (iter->iomap.type != IOMAP_ENCODED &&
+		    WARN_ON_ONCE(iter->processed > iomap_length(iter)))
 			return -EIO;
 		iter->pos += iter->processed;
 		iter->len -= iter->processed;
@@ -90,6 +91,11 @@ int iomap_iter(struct iomap_iter *iter, const struct iomap_ops *ops)
 
 	ret = ops->iomap_begin(iter->inode, iter->pos, iter->len, iter->flags,
 			       &iter->iomap, &iter->srcmap);
+	/* Process the entire extent if encoded */
+	if (iter->iomap.type == IOMAP_ENCODED && !iter->processed) {
+		iter->pos = iter->iomap.offset;
+		iter->len = iter->iomap.length;
+	}
 	if (ret < 0)
 		return ret;
 	iomap_iter_done(iter);
