@@ -30,6 +30,7 @@ struct vm_fault;
 #define IOMAP_MAPPED	2	/* blocks allocated at @addr */
 #define IOMAP_UNWRITTEN	3	/* blocks allocated at @addr in unwritten state */
 #define IOMAP_INLINE	4	/* data inline in the inode */
+#define IOMAP_ENCODED	5	/* data encoded, R/W whole extent */
 
 /*
  * Flags reported by the file system from iomap_begin:
@@ -261,7 +262,7 @@ struct iomap_read_folio_ops {
 	 * Optional, allows the filesystem to perform a custom submission of
 	 * bio, such as csum calculations or multi-device bio split
 	 */
-	void (*submit_io)(struct inode *inode, struct bio *bio);
+	void (*submit_io)(struct inode *inode, struct bio *bio, loff_t pos, bool encoded);
 
 	/*
 	 * Optional, allows filesystem to specify own bio_set, so new bio's

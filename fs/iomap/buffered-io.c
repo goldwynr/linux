@@ -17,6 +17,7 @@
 #include <linux/bio.h>
 #include <linux/sched/signal.h>
 #include <linux/migrate.h>
+#include <linux/pagevec.h>
 #include "trace.h"
 
 #include "../internal.h"
@@ -331,6 +332,64 @@ static inline bool iomap_block_needs_zeroing(const struct iomap_iter *iter,
 		pos >= i_size_read(iter->inode);
 }
 
+static loff_t
+iomap_read_encoded(const struct iomap_iter *iter, struct iomap_readpage_ctx *ctx)
+{
+	struct folio *folio;
+	const struct iomap *iomap = &iter->iomap;
+	struct address_space *mapping = iter->inode->i_mapping;
+	pgoff_t index = iomap->offset >> PAGE_SHIFT;
+	pgoff_t end_index = (iomap->offset + iomap->length + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	pgoff_t ra_index = -1, ra_end_index = 0;
+	gfp_t gfp = mapping_gfp_constraint(mapping, GFP_KERNEL);
+	struct bio *bio;
+	struct bio_set *bioset;
+
+	WARN_ON(ctx->cur_folio && (ctx->cur_folio->index > end_index ||
+			ctx->cur_folio->index < index));
+
+	/* If there is already a bio in progress, submit it first */
+	if (ctx->bio) {
+		ctx->ops->submit_io(iter->inode, ctx->bio, iter->pos, false);
+		ctx->bio = NULL;
+	}
+
+	if (ctx->ops && ctx->ops->bio_set)
+		bioset = ctx->ops->bio_set;
+	else
+		bioset = &fs_bio_set;
+	bio = bio_alloc_bioset(iomap->bdev, end_index - index + 1,
+			REQ_OP_READ, gfp, bioset);
+	bio->bi_iter.bi_sector = iomap_sector(iomap, iomap->offset);
+	bio->bi_end_io = iomap_read_end_io;
+
+	if (ctx->rac) {
+		ra_index = readahead_index(ctx->rac);
+		ra_end_index = ra_index + readahead_count(ctx->rac);
+	}
+
+	while (index < end_index) {
+		if (ctx->cur_folio && index == ctx->cur_folio->index) {
+			folio = ctx->cur_folio;
+			ctx->cur_folio = NULL;
+			ctx->cur_folio_in_bio = true;
+		} else if (index >= ra_index && index < ra_end_index) {
+			do {
+				folio = readahead_folio(ctx->rac);
+			} while (folio->index < index);
+			ra_index = readahead_index(ctx->rac);
+		} else {
+			folio = filemap_grab_folio(mapping, index);
+		}
+		bio_add_folio_nofail(bio, folio, folio_size(folio), 0);
+		index++;
+	}
+
+	ctx->ops->submit_io(iter->inode, bio, iomap->offset, true);
+
+	return iomap->length - (iter->pos - iomap->offset);
+}
+
 static loff_t iomap_readpage_iter(const struct iomap_iter *iter,
 		struct iomap_readpage_ctx *ctx, loff_t offset)
 {
@@ -345,6 +404,8 @@ static loff_t iomap_readpage_iter(const struct iomap_iter *iter,
 
 	if (iomap->type == IOMAP_INLINE)
 		return iomap_read_inline_data(iter, folio);
+	else if (iomap->type == IOMAP_ENCODED)
+		return iomap_read_encoded(iter, ctx);
 
 	/* zero post-eof blocks as the page may be mapped */
 	ifs = ifs_alloc(iter->inode, folio, iter->flags);
@@ -376,7 +437,7 @@ static loff_t iomap_readpage_iter(const struct iomap_iter *iter,
 
 		if (ctx->bio) {
 			if (ctx->ops && ctx->ops->submit_io)
-				ctx->ops->submit_io(iter->inode, ctx->bio);
+				ctx->ops->submit_io(iter->inode, ctx->bio, pos, false);
 			else
 				submit_bio(ctx->bio);
 		}
@@ -442,11 +503,11 @@ int iomap_read_folio(struct folio *folio, const struct iomap_ops *ops,
 
 	if (ctx.bio) {
 		if (ctx.ops->submit_io)
-			ctx.ops->submit_io(iter.inode, ctx.bio);
+			ctx.ops->submit_io(iter.inode, ctx.bio, iter.pos, false);
 		else
 			submit_bio(ctx.bio);
 		WARN_ON_ONCE(!ctx.cur_folio_in_bio);
-	} else {
+	} else if (iter.iomap.type != IOMAP_ENCODED) {
 		WARN_ON_ONCE(ctx.cur_folio_in_bio);
 		folio_unlock(folio);
 	}
@@ -521,7 +582,7 @@ void iomap_readahead(struct readahead_control *rac, const struct iomap_ops *ops,
 
 	if (ctx.bio) {
 		if (ctx.ops && ctx.ops->submit_io)
-			ctx.ops->submit_io(iter.inode, ctx.bio);
+			ctx.ops->submit_io(iter.inode, ctx.bio, iter.pos, false);
 		else
 			submit_bio(ctx.bio);
 	}
