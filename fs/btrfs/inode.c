@@ -7916,8 +7916,34 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 	return 0;
 }
 
+static void btrfs_read_submit_io(struct inode *inode, struct bio *bio,
+		loff_t pos, bool encoded)
+{
+	struct btrfs_bio *bbio = btrfs_bio(bio);
+
+	bbio->inode = BTRFS_I(inode);
+	bbio->fs_info = btrfs_sb(inode->i_sb);
+	atomic_set(&bbio->pending_ios, 1);
+
+	if (encoded) {
+		/*
+		 * We can set file_offset as iomap.offset because
+		 * there is one bbio per iomap.
+		 */
+		bbio->file_offset = pos;
+		btrfs_submit_compressed_read(bbio);
+	} else {
+		btrfs_submit_bio(bbio, 0);
+	}
+}
+
 static const struct iomap_ops btrfs_buffered_read_iomap_ops = {
 	.iomap_begin = btrfs_read_iomap_begin,
+};
+
+static const struct iomap_read_folio_ops btrfs_iomap_read_folio_ops = {
+	.submit_io 	= btrfs_read_submit_io,
+	.bio_set	= &btrfs_bioset,
 };
 
 static void btrfs_readahead(struct readahead_control *rac)
