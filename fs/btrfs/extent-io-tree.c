@@ -1836,6 +1836,7 @@ int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 	int err;
 	u64 failed_start;
 
+	WARN_ON(start > end);
 	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
 			       NULL, cached, NULL);
 	if (err == -EEXIST) {
@@ -1858,6 +1859,7 @@ int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 	int err;
 	u64 failed_start;
 
+	WARN_ON(start > end);
 	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
 			       &failed_state, cached_state, NULL);
 	while (err == -EEXIST) {
