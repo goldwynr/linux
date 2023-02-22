@@ -2941,7 +2941,6 @@ static noinline_for_stack int setup_relocation_extent_mapping(struct inode *inod
 				u64 start, u64 end, u64 block_start)
 {
 	struct extent_map *em;
-	struct extent_state *cached_state = NULL;
 	int ret = 0;
 
 	em = alloc_extent_map();
@@ -2954,9 +2953,7 @@ static noinline_for_stack int setup_relocation_extent_mapping(struct inode *inod
 	em->block_start = block_start;
 	em->flags |= EXTENT_FLAG_PINNED;
 
-	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached_state);
 	ret = btrfs_replace_extent_map_range(BTRFS_I(inode), em, false);
-	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached_state);
 	free_extent_map(em);
 
 	return ret;
@@ -3013,6 +3010,7 @@ static int relocate_one_page(struct inode *inode, struct file_ra_state *ra,
 				page_folio(page), page_index,
 				last_index + 1 - page_index);
 
+
 	if (!PageUptodate(page)) {
 		btrfs_read_folio(NULL, page_folio(page));
 		lock_page(page);
@@ -3048,27 +3046,14 @@ static int relocate_one_page(struct inode *inode, struct file_ra_state *ra,
 		u64 clamped_end = min(page_end, extent_end);
 		u32 clamped_len = clamped_end + 1 - clamped_start;
 
-		/* Reserve metadata for this range */
-		ret = btrfs_delalloc_reserve_metadata(BTRFS_I(inode),
-						      clamped_len, clamped_len,
-						      false);
-		if (ret)
-			goto release_page;
-
 		/* Mark the range delalloc and dirty for later writeback */
-		lock_extent(&BTRFS_I(inode)->io_tree, clamped_start, clamped_end,
-			    &cached_state);
 		ret = btrfs_set_extent_delalloc(BTRFS_I(inode), clamped_start,
 						clamped_end, 0, &cached_state);
 		if (ret) {
 			clear_extent_bit(&BTRFS_I(inode)->io_tree,
 					 clamped_start, clamped_end,
-					 EXTENT_LOCKED | EXTENT_BOUNDARY,
+					 EXTENT_BOUNDARY,
 					 &cached_state);
-			btrfs_delalloc_release_metadata(BTRFS_I(inode),
-							clamped_len, true);
-			btrfs_delalloc_release_extents(BTRFS_I(inode),
-						       clamped_len);
 			goto release_page;
 		}
 		btrfs_folio_set_dirty(fs_info, page_folio(page),
@@ -3092,9 +3077,6 @@ static int relocate_one_page(struct inode *inode, struct file_ra_state *ra,
 				       boundary_start, boundary_end,
 				       EXTENT_BOUNDARY, NULL);
 		}
-		unlock_extent(&BTRFS_I(inode)->io_tree, clamped_start, clamped_end,
-			      &cached_state);
-		btrfs_delalloc_release_extents(BTRFS_I(inode), clamped_len);
 		cur += clamped_len;
 
 		/* Crossed extent end, go to next extent */
@@ -3108,10 +3090,6 @@ static int relocate_one_page(struct inode *inode, struct file_ra_state *ra,
 	unlock_page(page);
 	put_page(page);
 
-	balance_dirty_pages_ratelimited(inode->i_mapping);
-	btrfs_throttle(fs_info);
-	if (btrfs_should_cancel_balance(fs_info))
-		ret = -ECANCELED;
 	return ret;
 
 release_page:
@@ -3123,12 +3101,17 @@ release_page:
 static int relocate_file_extent_cluster(struct inode *inode,
 					const struct file_extent_cluster *cluster)
 {
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	u64 offset = BTRFS_I(inode)->index_cnt;
 	unsigned long index;
 	unsigned long last_index;
 	struct file_ra_state *ra;
 	int cluster_nr = 0;
 	int ret = 0;
+	u64 start = cluster->start - offset;
+	u64 end = cluster->end - offset;
+	loff_t len = end + 1 - start;
+	struct extent_state *cached_state = NULL;
 
 	if (!cluster->nr)
 		return 0;
@@ -3143,18 +3126,36 @@ static int relocate_file_extent_cluster(struct inode *inode,
 
 	file_ra_state_init(ra, inode->i_mapping);
 
-	ret = setup_relocation_extent_mapping(inode, cluster->start - offset,
-				   cluster->end - offset, cluster->start);
+	ret = btrfs_delalloc_reserve_metadata(BTRFS_I(inode), len, len , false);
 	if (ret)
 		goto out;
+
+	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached_state);
+
+	ret = setup_relocation_extent_mapping(inode, start, end, cluster->start);
+	if (ret)
+		goto unlock;
 
 	last_index = (cluster->end - offset) >> PAGE_SHIFT;
 	for (index = (cluster->start - offset) >> PAGE_SHIFT;
 	     index <= last_index && !ret; index++)
 		ret = relocate_one_page(inode, ra, cluster, &cluster_nr, index);
-	if (ret == 0)
+	if (ret == 0) {
 		WARN_ON(cluster_nr != cluster->nr);
+	} else if (ret < 0 && last_index > index) {
+		loff_t rem_len = (last_index - index) << PAGE_SHIFT;
+		btrfs_delalloc_release_metadata(BTRFS_I(inode), rem_len, true);
+	}
+
+unlock:
+	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached_state);
+	btrfs_delalloc_release_extents(BTRFS_I(inode), len);
+
+	balance_dirty_pages_ratelimited(inode->i_mapping);
+	btrfs_throttle(fs_info);
 out:
+	if (btrfs_should_cancel_balance(fs_info))
+		ret = -ECANCELED;
 	kfree(ra);
 	return ret;
 }
