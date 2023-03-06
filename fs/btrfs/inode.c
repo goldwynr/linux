@@ -7962,18 +7962,18 @@ static void btrfs_read_submit_io(struct inode *inode, struct bio *bio,
 	}
 }
 
-static const struct iomap_ops btrfs_buffered_read_iomap_ops = {
+const struct iomap_ops btrfs_buffered_read_iomap_ops = {
 	.iomap_begin = btrfs_read_iomap_begin,
 };
 
-static const struct iomap_read_folio_ops btrfs_iomap_read_folio_ops = {
+const struct iomap_read_folio_ops btrfs_iomap_read_folio_ops = {
 	.submit_io 	= btrfs_read_submit_io,
 	.bio_set	= &btrfs_bioset,
 };
 
 static void btrfs_readahead(struct readahead_control *rac)
 {
-	extent_readahead(rac);
+	iomap_readahead(rac, &btrfs_buffered_read_iomap_ops, &btrfs_iomap_read_folio_ops);
 }
 
 /*

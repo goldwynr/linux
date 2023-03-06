@@ -737,4 +737,8 @@ size_t __attribute_const__ btrfs_get_num_csums(void);
 #define folio_set_ordered(folio)	folio_set_private_2(folio)
 #define folio_clear_ordered(folio)	folio_clear_private_2(folio)
 
+extern const struct iomap_read_folio_ops btrfs_iomap_read_folio_ops;
+extern const struct iomap_ops btrfs_buffered_read_iomap_ops;
+
+
 #endif
