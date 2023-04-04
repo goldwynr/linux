@@ -289,6 +289,7 @@ struct iomap_readpage_ctx {
 	bool			cur_folio_in_bio;
 	struct bio		*bio;
 	struct readahead_control *rac;
+	const struct iomap_read_folio_ops *ops;
 };
 
 /**
@@ -372,8 +373,12 @@ static loff_t iomap_readpage_iter(const struct iomap_iter *iter,
 		gfp_t orig_gfp = gfp;
 		unsigned int nr_vecs = DIV_ROUND_UP(length, PAGE_SIZE);
 
-		if (ctx->bio)
-			submit_bio(ctx->bio);
+		if (ctx->bio) {
+			if (ctx->ops && ctx->ops->submit_io)
+				ctx->ops->submit_io(iter->inode, ctx->bio);
+			else
+				submit_bio(ctx->bio);
+		}
 
 		if (ctx->rac) /* same as readahead_gfp_mask */
 			gfp |= __GFP_NORETRY | __GFP_NOWARN;
@@ -405,7 +410,8 @@ done:
 	return pos - orig_pos + plen;
 }
 
-int iomap_read_folio(struct folio *folio, const struct iomap_ops *ops)
+int iomap_read_folio(struct folio *folio, const struct iomap_ops *ops,
+		const struct iomap_read_folio_ops *read_folio_ops)
 {
 	struct iomap_iter iter = {
 		.inode		= folio->mapping->host,
@@ -414,6 +420,7 @@ int iomap_read_folio(struct folio *folio, const struct iomap_ops *ops)
 	};
 	struct iomap_readpage_ctx ctx = {
 		.cur_folio	= folio,
+		.ops		= read_folio_ops,
 	};
 	int ret;
 
@@ -426,7 +433,10 @@ int iomap_read_folio(struct folio *folio, const struct iomap_ops *ops)
 		folio_set_error(folio);
 
 	if (ctx.bio) {
-		submit_bio(ctx.bio);
+		if (ctx.ops->submit_io)
+			ctx.ops->submit_io(iter.inode, ctx.bio);
+		else
+			submit_bio(ctx.bio);
 		WARN_ON_ONCE(!ctx.cur_folio_in_bio);
 	} else {
 		WARN_ON_ONCE(ctx.cur_folio_in_bio);
@@ -471,6 +481,7 @@ static loff_t iomap_readahead_iter(const struct iomap_iter *iter,
  * iomap_readahead - Attempt to read pages from a file.
  * @rac: Describes the pages to be read.
  * @ops: The operations vector for the filesystem.
+ * @read_folio_ops: Function hooks for filesystems for special bio submissions
  *
  * This function is for filesystems to call to implement their readahead
  * address_space operation.
@@ -482,7 +493,8 @@ static loff_t iomap_readahead_iter(const struct iomap_iter *iter,
  * function is called with memalloc_nofs set, so allocations will not cause
  * the filesystem to be reentered.
  */
-void iomap_readahead(struct readahead_control *rac, const struct iomap_ops *ops)
+void iomap_readahead(struct readahead_control *rac, const struct iomap_ops *ops,
+		const struct iomap_read_folio_ops *read_folio_ops)
 {
 	struct iomap_iter iter = {
 		.inode	= rac->mapping->host,
@@ -491,6 +503,7 @@ void iomap_readahead(struct readahead_control *rac, const struct iomap_ops *ops)
 	};
 	struct iomap_readpage_ctx ctx = {
 		.rac	= rac,
+		.ops	= read_folio_ops,
 	};
 
 	trace_iomap_readahead(rac->mapping->host, readahead_count(rac));
@@ -498,8 +511,12 @@ void iomap_readahead(struct readahead_control *rac, const struct iomap_ops *ops)
 	while (iomap_iter(&iter, ops) > 0)
 		iter.processed = iomap_readahead_iter(&iter, &ctx);
 
-	if (ctx.bio)
-		submit_bio(ctx.bio);
+	if (ctx.bio) {
+		if (ctx.ops && ctx.ops->submit_io)
+			ctx.ops->submit_io(iter.inode, ctx.bio);
+		else
+			submit_bio(ctx.bio);
+	}
 	if (ctx.cur_folio) {
 		if (!ctx.cur_folio_in_bio)
 			folio_unlock(ctx.cur_folio);
