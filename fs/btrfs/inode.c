@@ -7916,6 +7916,11 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 	return 0;
 }
 
+static void btrfs_read_endio(struct btrfs_bio *bbio)
+{
+	iomap_read_end_io(&bbio->bio);
+}
+
 static void btrfs_read_submit_io(struct inode *inode, struct bio *bio,
 		loff_t pos, bool encoded)
 {
@@ -7924,6 +7929,7 @@ static void btrfs_read_submit_io(struct inode *inode, struct bio *bio,
 	bbio->inode = BTRFS_I(inode);
 	bbio->fs_info = btrfs_sb(inode->i_sb);
 	atomic_set(&bbio->pending_ios, 1);
+	bbio->end_io = btrfs_read_endio;
 
 	if (encoded) {
 		/*
