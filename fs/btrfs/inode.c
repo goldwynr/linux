@@ -8096,6 +8096,9 @@ static int btrfs_writepages(struct address_space *mapping,
 	int ret;
 	loff_t isize = i_size_read(inode);
 	int saved_range_cyclic = wbc->range_cyclic;
+	struct iomap_writepage_ctx wpc = {
+		.wbc	= wbc,
+	};
 
 	if (saved_range_cyclic) {
 		start = mapping->writeback_index << PAGE_SHIFT;
@@ -8112,7 +8115,7 @@ static int btrfs_writepages(struct address_space *mapping,
 		return 0;
 
 	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
-	ret = extent_writepages(mapping, wbc);
+	ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
 	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
 
 	if (saved_range_cyclic)
