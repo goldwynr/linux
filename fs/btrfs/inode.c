@@ -142,7 +142,6 @@ static struct extent_map *create_io_em(struct btrfs_inode *inode, u64 start,
 				       u64 block_len, u64 orig_block_len,
 				       u64 ram_bytes, int compress_type,
 				       int type);
-
 static int data_reloc_print_warning_inode(u64 inum, u64 offset, u64 num_bytes,
 					  u64 root, void *warn_ctx)
 {
@@ -704,7 +703,6 @@ out:
 struct async_extent {
 	struct btrfs_inode *inode;
 	struct btrfs_bio *bbio;
-	struct page *locked_page;
 	u64 start;
 	u64 end;
 	blk_opf_t write_flags;
@@ -714,7 +712,6 @@ struct async_extent {
 	unsigned long nr_pages;
 	struct cgroup_subsys_state *blkcg_css;
 	struct btrfs_work work;
-	struct async_cow *async_cow;
 };
 
 /*
@@ -1538,13 +1535,15 @@ static noinline void submit_compressed_extent(struct btrfs_work *work, bool do_f
 		cond_wake_up_nomb(&fs_info->async_submit_wait);
 }
 
-static bool run_delalloc_compressed(struct btrfs_inode *inode,
-				    struct page *locked_page, u64 start,
-				    u64 end, struct writeback_control *wbc)
+static void writepages_async(struct iomap_ioend *ioend,
+		struct bio *bio, struct writeback_control *wbc)
 {
+	struct btrfs_inode *inode = BTRFS_I(ioend->io_inode);
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	struct cgroup_subsys_state *blkcg_css = wbc_blkcg_css(wbc);
 	struct async_extent *async_extent;
+	u64 start = round_down(ioend->io_offset, fs_info->sectorsize);
+	u64 end = round_up(start + ioend->io_size, fs_info->sectorsize) - 1;
 	unsigned long nr_pages;
 	unsigned nofs_flag;
 
@@ -1557,13 +1556,14 @@ static bool run_delalloc_compressed(struct btrfs_inode *inode,
 			EXTENT_DO_ACCOUNTING;
 		clear_extent_bits(&inode->io_tree, start, end, clear_bits);
 		btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(-ENOMEM));
-		return false;
+		async_extent->bbio = NULL;
+		return;
 	}
 
-	unlock_extent(&inode->io_tree, start, end, NULL);
 	set_bit(BTRFS_INODE_HAS_ASYNC_EXTENT, &inode->runtime_flags);
 
 	async_extent->inode = inode;
+	async_extent->bbio = btrfs_bio(bio);
 	async_extent->start = start;
 	async_extent->end = end;
 	async_extent->write_flags = wbc_to_write_flags(wbc);
@@ -1581,8 +1581,6 @@ static bool run_delalloc_compressed(struct btrfs_inode *inode,
 	nr_pages = DIV_ROUND_UP(end - start, PAGE_SIZE);
 	atomic_add(nr_pages, &fs_info->async_delalloc_pages);
 	btrfs_queue_work(fs_info->delalloc_workers, &async_extent->work);
-
-	return true;
 }
 
 /*
@@ -2154,11 +2152,6 @@ int btrfs_run_delalloc_range(struct btrfs_inode *inode, struct page *locked_page
 		ret = run_delalloc_nocow(inode, locked_page, start, end);
 		goto out;
 	}
-
-	if (btrfs_inode_can_compress(inode) &&
-	    inode_need_compress(inode, start, end) &&
-	    run_delalloc_compressed(inode, locked_page, start, end, wbc))
-		return 1;
 
 	if (zoned)
 		ret = run_delalloc_cow(inode, locked_page, start, end, wbc,
@@ -7967,9 +7960,6 @@ static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioe
 	btrfs_bio_init(bbio, fs_info, btrfs_writepages_endio, ioend);
 	bbio->inode = BTRFS_I(ioend->io_inode);
 	bbio->file_offset = ioend->io_offset;
-	bbio->ordered = btrfs_lookup_ordered_extent(bbio->inode, bbio->file_offset);
-	if (!bbio->ordered)
-		return -ESRCH;
 
 	return status;
 }
@@ -7977,7 +7967,17 @@ static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioe
 static void btrfs_writepages_submit_io(struct iomap_ioend *ioend,
 		struct bio *iomap_bio, struct writeback_control *wbc)
 {
+	struct btrfs_fs_info *fs_info = btrfs_sb(ioend->io_inode->i_sb);
 	struct btrfs_bio *bbio = btrfs_bio(iomap_bio);
+
+	if (btrfs_test_opt(fs_info, COMPRESS) &&
+			btrfs_inode_can_compress(BTRFS_I(ioend->io_inode))) {
+		writepages_async(ioend, iomap_bio, wbc);
+		return;
+	}
+
+	bbio->ordered = btrfs_lookup_ordered_extent(bbio->inode, bbio->file_offset);
+	BUG_ON(!bbio->ordered);
 	btrfs_submit_bio(bbio, 0);
 }
 
