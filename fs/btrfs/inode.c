@@ -8026,6 +8026,27 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 	if (ret != 0)
 		return ret;
 
+	/*
+	 * Compression: Return a maximum of BTRFS_MAX_COMPRESSED iomap since
+	 * we have the disk address mapped only after pages are compressed.
+	 * This helps divide the writeback into 128k chunks automatically.
+	 */
+	if (btrfs_test_opt(fs_info, COMPRESS) &&
+			btrfs_inode_can_compress(BTRFS_I(inode))) {
+		size_t len = end - start + 1;
+		wpc->iomap.offset = start;
+		wpc->iomap.type = IOMAP_ENCODED;
+		wpc->iomap.length = min((size_t)BTRFS_MAX_COMPRESSED, len);
+		/*
+		 * iomap.addr will not be used because btrfs makes
+		 * compressed_bio out of the bio returned by iomap code.
+		 * which has it's own extent and hence it's own sector
+		 */
+		wpc->iomap.addr = 0;
+		wpc->iomap.bdev = fs_info->fs_devices->latest_dev->bdev;
+		return 0;
+	}
+
 	ret = btrfs_run_delalloc_range(BTRFS_I(inode), NULL,
 			start, end, wpc->wbc);
 	if (ret < 0)
