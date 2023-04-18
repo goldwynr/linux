@@ -89,6 +89,29 @@ bool btrfs_compress_is_valid_type(const char *str, size_t len)
 	return false;
 }
 
+static ssize_t compression_compress_bio(int type, struct list_head *ws,
+		struct bio *bio, struct page **pages, unsigned long *out_pages)
+{
+
+	switch (type) {
+	case BTRFS_COMPRESS_LZO:
+		return lzo_compress_bio(ws, bio, pages, out_pages);
+	case BTRFS_COMPRESS_NONE:
+	default:
+		/*
+		 * This can happen when compression races with remount setting
+		 * it to 'no compress', while caller doesn't call
+		 * inode_need_compress() to check if we really need to
+		 * compress.
+		 *
+		 * Not a big deal, just need to inform caller that we
+		 * haven't allocated any pages yet.
+		 */
+		*out_pages = 0;
+		return -E2BIG;
+	}
+}
+
 static int compression_compress_pages(int type, struct list_head *ws,
                struct address_space *mapping, u64 start, struct page **pages,
                unsigned long *out_pages, unsigned long *total_in,

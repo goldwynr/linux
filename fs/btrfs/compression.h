@@ -160,6 +160,8 @@ struct list_head *zlib_alloc_workspace(unsigned int level);
 void zlib_free_workspace(struct list_head *ws);
 struct list_head *zlib_get_workspace(unsigned int level);
 
+ssize_t lzo_compress_bio(struct list_head *ws, struct bio *bio,
+               struct page **pages, unsigned long *out_pages);
 int lzo_compress_pages(struct list_head *ws, struct address_space *mapping,
 		u64 start, struct page **pages, unsigned long *out_pages,
 		unsigned long *total_in, unsigned long *total_out);
