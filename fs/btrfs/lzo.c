@@ -132,7 +132,7 @@ static int copy_compressed_data_to_page(char *compressed_data,
 					size_t compressed_size,
 					struct page **out_pages,
 					unsigned long max_nr_page,
-					u32 *cur_out,
+					ssize_t *cur_out,
 					const u32 sectorsize)
 {
 	u32 sector_bytes_left;
@@ -209,6 +209,43 @@ out:
 	return 0;
 }
 
+ssize_t lzo_compress_bio(struct list_head *ws, struct bio *bio,
+		struct page **pages, unsigned long *out_pages)
+{
+	struct workspace *workspace = list_entry(ws, struct workspace, list);
+	char *data;
+	ssize_t cur_out = LZO_LEN; /* for LZO header, written at the end */
+	const unsigned int max_pages = *out_pages;
+	struct folio_iter fi;
+	int ret = 0;
+
+	bio_for_each_folio_all(fi, bio) {
+		size_t out_len;
+
+		data = (char *)folio_address(fi.folio) + fi.offset;
+		ret = lzo1x_1_compress(data, fi.length,
+				workspace->cbuf, &out_len,
+				workspace->mem);
+		if (ret < 0) {
+			pr_debug("BTRFS: lzo in loop returned %d\n", ret);
+			cur_out = -EIO;
+			goto out;
+		}
+
+		ret = copy_compressed_data_to_page(workspace->cbuf, out_len,
+				pages, max_pages,
+				&cur_out, PAGE_SIZE);
+	}
+
+	/* Store the size of all chunks of compressed data */
+	data = kmap_local_page(pages[0]);
+	write_compress_length(data, cur_out);
+	kunmap_local(data);
+out:
+	*out_pages = DIV_ROUND_UP(cur_out, PAGE_SIZE);
+	return cur_out;
+}
+
 int lzo_compress_pages(struct list_head *ws, struct address_space *mapping,
 		u64 start, struct page **pages, unsigned long *out_pages,
 		unsigned long *total_in, unsigned long *total_out)
@@ -222,7 +259,7 @@ int lzo_compress_pages(struct list_head *ws, struct address_space *mapping,
 	/* Points to the file offset of input data */
 	u64 cur_in = start;
 	/* Points to the current output byte */
-	u32 cur_out = 0;
+	ssize_t cur_out = 0;
 	u32 len = *total_out;
 
 	ASSERT(max_nr_page > 0);
