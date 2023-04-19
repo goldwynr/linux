@@ -374,27 +374,24 @@ fail:
 	return ERR_PTR(-ENOMEM);
 }
 
-int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
-		u64 start, struct page **pages, unsigned long *out_pages,
-		unsigned long *total_in, unsigned long *total_out)
+ssize_t zstd_compress_bio(struct list_head *ws, struct bio *bio,
+		struct page **pages, unsigned long *out_pages)
 {
 	struct workspace *workspace = list_entry(ws, struct workspace, list);
 	zstd_cstream *stream;
-	int ret = 0;
+	ssize_t ret = 0;
 	int nr_pages = 0;
-	struct page *in_page = NULL;  /* The current page to read */
 	struct page *out_page = NULL; /* The current page to write to */
 	unsigned long tot_in = 0;
 	unsigned long tot_out = 0;
-	unsigned long len = *total_out;
+	unsigned long len = bio->bi_iter.bi_size;
 	const unsigned long nr_dest_pages = *out_pages;
 	unsigned long max_out = nr_dest_pages * PAGE_SIZE;
+	struct folio_iter fi;
 	zstd_parameters params = zstd_get_btrfs_parameters(workspace->req_level,
 							   len);
 
 	*out_pages = 0;
-	*total_out = 0;
-	*total_in = 0;
 
 	/* Initialize the stream */
 	stream = zstd_init_cstream(&params, len, workspace->mem,
@@ -404,12 +401,6 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 		ret = -EIO;
 		goto out;
 	}
-
-	/* map in the first page of input data */
-	in_page = find_get_page(mapping, start >> PAGE_SHIFT);
-	workspace->in_buf.src = kmap_local_page(in_page);
-	workspace->in_buf.pos = 0;
-	workspace->in_buf.size = min_t(size_t, len, PAGE_SIZE);
 
 	/* Allocate and map in the output buffer */
 	out_page = btrfs_alloc_compr_page();
@@ -422,9 +413,15 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 	workspace->out_buf.pos = 0;
 	workspace->out_buf.size = min_t(size_t, max_out, PAGE_SIZE);
 
-	while (1) {
+	bio_for_each_folio_all(fi, bio) {
 		size_t ret2;
 
+		/* map in the first page of input data */
+		workspace->in_buf.src = folio_address(fi.folio) + fi.offset;
+		workspace->in_buf.pos = 0;
+		workspace->in_buf.size = fi.length;
+		tot_in += fi.length;
+compress:
 		ret2 = zstd_compress_stream(stream, &workspace->out_buf,
 				&workspace->in_buf);
 		if (zstd_is_error(ret2)) {
@@ -467,25 +464,7 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 			workspace->out_buf.pos = 0;
 			workspace->out_buf.size = min_t(size_t, max_out,
 							PAGE_SIZE);
-		}
-
-		/* We've reached the end of the input */
-		if (workspace->in_buf.pos >= len) {
-			tot_in += workspace->in_buf.pos;
-			break;
-		}
-
-		/* Check if we need more input */
-		if (workspace->in_buf.pos == workspace->in_buf.size) {
-			tot_in += PAGE_SIZE;
-			kunmap_local(workspace->in_buf.src);
-			put_page(in_page);
-			start += PAGE_SIZE;
-			len -= PAGE_SIZE;
-			in_page = find_get_page(mapping, start >> PAGE_SHIFT);
-			workspace->in_buf.src = kmap_local_page(in_page);
-			workspace->in_buf.pos = 0;
-			workspace->in_buf.size = min_t(size_t, len, PAGE_SIZE);
+			goto compress;
 		}
 	}
 	while (1) {
@@ -530,15 +509,9 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 		goto out;
 	}
 
-	ret = 0;
-	*total_in = tot_in;
-	*total_out = tot_out;
+	ret = tot_out;
 out:
 	*out_pages = nr_pages;
-	if (workspace->in_buf.src) {
-		kunmap_local(workspace->in_buf.src);
-		put_page(in_page);
-	}
 	return ret;
 }
 
