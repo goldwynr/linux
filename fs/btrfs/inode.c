@@ -713,6 +713,7 @@ struct async_extent {
 
 struct async_chunk {
 	struct btrfs_inode *inode;
+	struct bio *bio;
 	struct page *locked_page;
 	u64 start;
 	u64 end;
@@ -919,7 +920,7 @@ again:
 
 	total_compressed = min_t(unsigned long, total_compressed,
 			BTRFS_MAX_UNCOMPRESSED);
-	total_in = 0;
+	total_in = async_chunk->bio->bi_iter.bi_size;
 	ret = 0;
 
 	/*
@@ -945,11 +946,12 @@ again:
 		compress_type = inode->prop_compress;
 
 	/* Compression level is applied here. */
-	ret = btrfs_compress_pages(compress_type | (fs_info->compress_level << 4),
-				   mapping, start, pages, &nr_pages, &total_in,
-				   &total_compressed);
-	if (ret)
+	ret = btrfs_compress_bio(compress_type | (fs_info->compress_level << 4),
+				 async_chunk->bio, pages, &nr_pages);
+	if (ret < 0)
 		goto mark_incompressible;
+
+	total_compressed = ret;
 
 	/*
 	 * Zero the tail end of the last page, as we might be sending it down

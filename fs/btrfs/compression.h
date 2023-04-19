@@ -85,11 +85,8 @@ static inline unsigned int btrfs_compress_level(unsigned int type_level)
 int __init btrfs_init_compress(void);
 void __cold btrfs_exit_compress(void);
 
-int btrfs_compress_pages(unsigned int type_level, struct address_space *mapping,
-			 u64 start, struct page **pages,
-			 unsigned long *out_pages,
-			 unsigned long *total_in,
-			 unsigned long *total_out);
+int btrfs_compress_bio(unsigned int type_level, struct bio *bio,
+		struct page **pages, unsigned long *out_pages);
 int btrfs_decompress(int type, const u8 *data_in, struct page *dest_page,
 		     unsigned long start_byte, size_t srclen, size_t destlen);
 int btrfs_decompress_buf2page(const char *buf, u32 buf_len,

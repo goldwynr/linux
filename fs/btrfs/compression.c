@@ -116,31 +116,6 @@ static ssize_t compression_compress_bio(int type, struct list_head *ws,
 	}
 }
 
-static int compression_compress_pages(int type, struct list_head *ws,
-               struct address_space *mapping, u64 start, struct page **pages,
-               unsigned long *out_pages, unsigned long *total_in,
-               unsigned long *total_out)
-{
-	switch (type) {
-	case BTRFS_COMPRESS_LZO:
-		return lzo_compress_pages(ws, mapping, start, pages,
-				out_pages, total_in, total_out);
-	case BTRFS_COMPRESS_NONE:
-	default:
-		/*
-		 * This can happen when compression races with remount setting
-		 * it to 'no compress', while caller doesn't call
-		 * inode_need_compress() to check if we really need to
-		 * compress.
-		 *
-		 * Not a big deal, just need to inform caller that we
-		 * haven't allocated any pages yet.
-		 */
-		*out_pages = 0;
-		return -E2BIG;
-	}
-}
-
 static int compression_decompress_bio(struct list_head *ws,
 				      struct compressed_bio *cb)
 {
@@ -1010,11 +985,9 @@ static unsigned int btrfs_compress_set_level(int type, unsigned level)
  * @total_out is an in/out parameter, must be set to the input length and will
  * be also used to return the total number of compressed bytes
  */
-int btrfs_compress_pages(unsigned int type_level, struct address_space *mapping,
-			 u64 start, struct page **pages,
-			 unsigned long *out_pages,
-			 unsigned long *total_in,
-			 unsigned long *total_out)
+int btrfs_compress_bio(unsigned int type_level, struct bio *bio,
+			 struct page **pages,
+			 unsigned long *out_pages)
 {
 	int type = btrfs_compress_type(type_level);
 	int level = btrfs_compress_level(type_level);
@@ -1023,8 +996,8 @@ int btrfs_compress_pages(unsigned int type_level, struct address_space *mapping,
 
 	level = btrfs_compress_set_level(type, level);
 	workspace = get_workspace(type, level);
-	ret = compression_compress_pages(type, workspace, mapping, start, pages,
-					 out_pages, total_in, total_out);
+	ret = compression_compress_bio(type, workspace, bio, pages,
+					 out_pages);
 	put_workspace(type, workspace);
 	return ret;
 }
