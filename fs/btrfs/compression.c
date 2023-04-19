@@ -96,6 +96,8 @@ static ssize_t compression_compress_bio(int type, struct list_head *ws,
 	switch (type) {
 	case BTRFS_COMPRESS_LZO:
 		return lzo_compress_bio(ws, bio, pages, out_pages);
+	case BTRFS_COMPRESS_ZSTD:
+		return zstd_compress_bio(ws, bio, pages, out_pages);
 	case BTRFS_COMPRESS_NONE:
 	default:
 		/*
@@ -123,9 +125,6 @@ static int compression_compress_pages(int type, struct list_head *ws,
 				out_pages, total_in, total_out);
 	case BTRFS_COMPRESS_LZO:
 		return lzo_compress_pages(ws, mapping, start, pages,
-				out_pages, total_in, total_out);
-	case BTRFS_COMPRESS_ZSTD:
-		return zstd_compress_pages(ws, mapping, start, pages,
 				out_pages, total_in, total_out);
 	case BTRFS_COMPRESS_NONE:
 	default:

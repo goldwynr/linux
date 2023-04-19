@@ -171,10 +171,8 @@ int lzo_decompress(struct list_head *ws, const u8 *data_in,
 		size_t destlen);
 struct list_head *lzo_alloc_workspace(unsigned int level);
 void lzo_free_workspace(struct list_head *ws);
-
-int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
-		u64 start, struct page **pages, unsigned long *out_pages,
-		unsigned long *total_in, unsigned long *total_out);
+ssize_t zstd_compress_bio(struct list_head *ws, struct bio *bio,
+		struct page **pages, unsigned long *out_pages);
 int zstd_decompress_bio(struct list_head *ws, struct compressed_bio *cb);
 int zstd_decompress(struct list_head *ws, const u8 *data_in,
 		struct page *dest_page, unsigned long dest_pgoff, size_t srclen,
