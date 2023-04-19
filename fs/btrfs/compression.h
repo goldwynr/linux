@@ -149,9 +149,8 @@ bool btrfs_compress_is_valid_type(const char *str, size_t len);
 
 int btrfs_compress_heuristic(struct inode *inode, u64 start, u64 end);
 
-int zlib_compress_pages(struct list_head *ws, struct address_space *mapping,
-		u64 start, struct page **pages, unsigned long *out_pages,
-		unsigned long *total_in, unsigned long *total_out);
+ssize_t zlib_compress_bio(struct list_head *ws, struct bio *bio,
+		struct page **pages, unsigned long *out_pages);
 int zlib_decompress_bio(struct list_head *ws, struct compressed_bio *cb);
 int zlib_decompress(struct list_head *ws, const u8 *data_in,
 		struct page *dest_page, unsigned long dest_pgoff, size_t srclen,
