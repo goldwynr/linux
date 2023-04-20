@@ -1096,9 +1096,10 @@ static int submit_async_extent(struct async_extent *async_extent)
 			NULL, EXTENT_LOCKED | EXTENT_DELALLOC,
 			PAGE_UNLOCK | PAGE_START_WRITEBACK);
 	btrfs_submit_compressed_write(ordered,
+			    async_extent->bbio,
 			    async_extent->pages,	/* compressed_pages */
 			    async_extent->nr_pages,
-			    async_extent->write_flags, true);
+			    async_extent->write_flags);
 done:
 	if (async_extent->blkcg_css)
 		kthread_associate_blkcg(NULL);
@@ -1116,6 +1117,7 @@ out_free:
 				     PAGE_UNLOCK | PAGE_START_WRITEBACK |
 				     PAGE_END_WRITEBACK);
 	free_async_extent_pages(async_extent);
+	btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(ret));
 	goto done;
 }
 
@@ -10497,7 +10499,7 @@ ssize_t btrfs_do_encoded_write(struct kiocb *iocb, struct iov_iter *from,
 
 	btrfs_delalloc_release_extents(inode, num_bytes);
 
-	btrfs_submit_compressed_write(ordered, pages, nr_pages, 0, false);
+	btrfs_submit_compressed_write(ordered, NULL, pages, nr_pages, 0);
 
 	unlock_extent(io_tree, start, end, &cached_state);
 	ret = orig_count;

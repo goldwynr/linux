@@ -270,54 +270,17 @@ static void end_bbio_comprssed_read(struct btrfs_bio *bbio)
 	bio_put(&bbio->bio);
 }
 
-/*
- * Clear the writeback bits on all of the file
- * pages for a compressed write
- */
-static noinline void end_compressed_writeback(const struct compressed_bio *cb)
-{
-	struct inode *inode = &cb->bbio.inode->vfs_inode;
-	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-	unsigned long index = cb->start >> PAGE_SHIFT;
-	unsigned long end_index = (cb->start + cb->len - 1) >> PAGE_SHIFT;
-	struct folio_batch fbatch;
-	const int error = blk_status_to_errno(cb->bbio.bio.bi_status);
-	int i;
-	int ret;
-
-	if (error)
-		mapping_set_error(inode->i_mapping, error);
-
-	folio_batch_init(&fbatch);
-	while (index <= end_index) {
-		ret = filemap_get_folios(inode->i_mapping, &index, end_index,
-				&fbatch);
-
-		if (ret == 0)
-			return;
-
-		for (i = 0; i < ret; i++) {
-			struct folio *folio = fbatch.folios[i];
-
-			btrfs_folio_clamp_clear_writeback(fs_info, folio,
-							  cb->start, cb->len);
-		}
-		folio_batch_release(&fbatch);
-	}
-	/* the inode may be gone now */
-}
-
 static void btrfs_finish_compressed_write_work(struct work_struct *work)
 {
 	struct compressed_bio *cb =
 		container_of(work, struct compressed_bio, write_end_work);
+	blk_status_t status = cb->bbio.bio.bi_status;
 
-	btrfs_finish_ordered_extent(cb->bbio.ordered, NULL, cb->start, cb->len,
-				    cb->bbio.bio.bi_status == BLK_STS_OK);
-
-	if (cb->writeback)
-		end_compressed_writeback(cb);
-	/* Note, our inode could be gone now */
+	if (cb->orig_bbio)
+		btrfs_bio_end_io(cb->orig_bbio, status);
+	else
+		btrfs_finish_ordered_extent(cb->bbio.ordered, NULL, cb->start,
+				cb->len, status == BLK_STS_OK);
 
 	btrfs_free_compressed_pages(cb);
 	bio_put(&cb->bbio.bio);
@@ -363,10 +326,10 @@ static void btrfs_add_compressed_bio_pages(struct compressed_bio *cb)
  * the end io hooks.
  */
 void btrfs_submit_compressed_write(struct btrfs_ordered_extent *ordered,
+				   struct btrfs_bio *bbio,
 				   struct page **compressed_pages,
 				   unsigned int nr_pages,
-				   blk_opf_t write_flags,
-				   bool writeback)
+				   blk_opf_t write_flags)
 {
 	struct btrfs_inode *inode = BTRFS_I(ordered->inode);
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
@@ -382,7 +345,16 @@ void btrfs_submit_compressed_write(struct btrfs_ordered_extent *ordered,
 	cb->len = ordered->num_bytes;
 	cb->compressed_pages = compressed_pages;
 	cb->compressed_len = ordered->disk_num_bytes;
-	cb->writeback = writeback;
+	cb->orig_bbio = bbio;
+	if (bbio) {
+		/*
+		 * Setup the ordered and increase refcount so
+		 * that we hold a reference until endio on the original
+		 * btrfs_bio is called
+		 */
+		bbio->ordered = ordered;
+		refcount_inc(&ordered->refs);
+	}
 	INIT_WORK(&cb->write_end_work, btrfs_finish_compressed_write_work);
 	cb->nr_pages = nr_pages;
 	cb->bbio.bio.bi_iter.bi_sector = ordered->disk_bytenr >> SECTOR_SHIFT;

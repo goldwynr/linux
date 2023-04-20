@@ -59,14 +59,10 @@ struct compressed_bio {
 	/* The compression algorithm for this bio */
 	u8 compress_type;
 
-	/* Whether this is a write for writeback. */
-	bool writeback;
+	/* Writeback/read bio passed by iomap */
+	struct btrfs_bio *orig_bbio;
 
-	union {
-		/* For reads, this is the bio we are copying the data into */
-		struct btrfs_bio *orig_bbio;
-		struct work_struct write_end_work;
-	};
+	struct work_struct write_end_work;
 
 	/* Must be last. */
 	struct btrfs_bio bbio;
@@ -93,10 +89,10 @@ int btrfs_decompress_buf2page(const char *buf, u32 buf_len,
 			      struct compressed_bio *cb, u32 decompressed);
 
 void btrfs_submit_compressed_write(struct btrfs_ordered_extent *ordered,
+				  struct btrfs_bio *bbio,
 				  struct page **compressed_pages,
 				  unsigned int nr_pages,
-				  blk_opf_t write_flags,
-				  bool writeback);
+				  blk_opf_t write_flags);
 void btrfs_submit_compressed_read(struct btrfs_bio *bbio);
 
 unsigned int btrfs_compress_str2level(unsigned int type, const char *str);
