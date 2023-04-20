@@ -805,7 +805,6 @@ static void compress_file_range(struct btrfs_work *work)
 		container_of(work, struct async_extent, work);
 	struct btrfs_inode *inode = async_extent->inode;
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
-	struct address_space *mapping = inode->vfs_inode.i_mapping;
 	u64 blocksize = fs_info->sectorsize;
 	u64 start = async_extent->start;
 	u64 end = async_extent->end;
@@ -948,25 +947,10 @@ static void compress_file_range(struct btrfs_work *work)
 				EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
 				EXTENT_DO_ACCOUNTING;
 
-			if (ret < 0)
-				mapping_set_error(mapping, -EIO);
+			clear_extent_bits(&inode->io_tree, clear_flags,
+					start, end);
 
-			/*
-			 * inline extent creation worked or returned error,
-			 * we don't need to create any more async work items.
-			 * Unlock and free up our temp pages.
-			 *
-			 * We use DO_ACCOUNTING here because we need the
-			 * delalloc_release_metadata to be done _after_ we drop
-			 * our outstanding extent for clearing delalloc for this
-			 * range.
-			 */
-			extent_clear_unlock_delalloc(inode, start, end,
-						     NULL,
-						     clear_flags,
-						     PAGE_UNLOCK |
-						     PAGE_START_WRITEBACK |
-						     PAGE_END_WRITEBACK);
+			btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(ret));
 			goto free_pages;
 		}
 	}
