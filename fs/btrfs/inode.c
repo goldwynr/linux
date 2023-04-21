@@ -814,7 +814,6 @@ static void compress_file_range(struct btrfs_work *work)
 	struct page **pages;
 	unsigned long nr_pages;
 	unsigned long total_compressed = 0;
-	unsigned long total_in = 0;
 	unsigned int poff;
 	int i;
 	int compress_type = fs_info->compress_type;
@@ -881,7 +880,6 @@ static void compress_file_range(struct btrfs_work *work)
 
 	total_compressed = min_t(unsigned long, total_compressed,
 			BTRFS_MAX_UNCOMPRESSED);
-	total_in = async_extent->bbio->bio.bi_iter.bi_size;
 	ret = 0;
 
 	/*
@@ -932,16 +930,10 @@ static void compress_file_range(struct btrfs_work *work)
 	 * extent for the subpage case.
 	 */
 	if (start == 0 && fs_info->sectorsize == PAGE_SIZE) {
-		if (total_in < actual_end) {
-			ret = cow_file_range_inline(inode, actual_end, 0,
-						    BTRFS_COMPRESS_NONE, NULL,
-						    false);
-		} else {
-			ret = cow_file_range_inline(inode, actual_end,
-						    total_compressed,
-						    compress_type, pages,
-						    false);
-		}
+		ret = cow_file_range_inline(inode, actual_end,
+				total_compressed,
+				compress_type, pages,
+				false);
 		if (ret <= 0) {
 			unsigned long clear_flags = EXTENT_DELALLOC |
 				EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
@@ -1219,57 +1211,6 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 
 	inode_should_defrag(inode, start, end, num_bytes, SZ_64K);
 
-	/*
-	 * Due to the page size limit, for subpage we can only trigger the
-	 * writeback for the dirty sectors of page, that means data writeback
-	 * is doing more writeback than what we want.
-	 *
-	 * This is especially unexpected for some call sites like fallocate,
-	 * where we only increase i_size after everything is done.
-	 * This means we can trigger inline extent even if we didn't want to.
-	 * So here we skip inline extent creation completely.
-	 */
-	if (start == 0 && fs_info->sectorsize == PAGE_SIZE && !no_inline) {
-		u64 actual_end = min_t(u64, i_size_read(&inode->vfs_inode),
-				       end + 1);
-
-		/* lets try to make an inline extent */
-		ret = cow_file_range_inline(inode, actual_end, 0,
-					    BTRFS_COMPRESS_NONE, NULL, false);
-		if (ret == 0) {
-			/*
-			 * We use DO_ACCOUNTING here because we need the
-			 * delalloc_release_metadata to be run _after_ we drop
-			 * our outstanding extent for clearing delalloc for this
-			 * range.
-			 */
-			extent_clear_unlock_delalloc(inode, start, end,
-				     locked_page,
-				     EXTENT_DELALLOC |
-				     EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
-				     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
-				     PAGE_START_WRITEBACK | PAGE_END_WRITEBACK);
-			/*
-			 * locked_page is locked by the caller of
-			 * writepage_delalloc(), not locked by
-			 * __process_pages_contig().
-			 *
-			 * We can't let __process_pages_contig() to unlock it,
-			 * as it doesn't have any subpage::writers recorded.
-			 *
-			 * Here we manually unlock the page, since the caller
-			 * can't determine if it's an inline extent or a
-			 * compressed extent.
-			 */
-			if (locked_page)
-				unlock_page(locked_page);
-			ret = 1;
-			goto done;
-		} else if (ret < 0) {
-			goto out_unlock;
-		}
-	}
-
 	alloc_hint = get_extent_allocation_hint(inode, start, num_bytes);
 
 	/*
@@ -1403,7 +1344,6 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 		if (ret)
 			goto out_unlock;
 	}
-done:
 	if (done_offset)
 		*done_offset = end;
 	return ret;
@@ -8000,9 +7940,29 @@ static int btrfs_writepages(struct address_space *mapping,
 		return 0;
 
 	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
-	ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
-	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
 
+	/*
+	 * Try writing inline first.
+	 * Most writebacks are more than BTRFS_MAX_INLINE_DATA_SIZE, so this
+	 * is likely to fail.
+	 */
+	if (start == 0 && i_blocksize(inode) == PAGE_SIZE) {
+		ret = cow_file_range_inline(BTRFS_I(inode), isize, 0,
+				BTRFS_COMPRESS_NONE, NULL, false);
+		if (ret == 0) {
+			clear_extent_bit(&BTRFS_I(inode)->io_tree, start, end,
+					EXTENT_LOCKED | EXTENT_DELALLOC |
+					EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
+					EXTENT_DO_ACCOUNTING, &cached);
+			goto out;
+		}
+		ret = 0;
+	}
+
+	ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
+
+	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+out:
 	if (saved_range_cyclic)
 		wbc->range_cyclic = 1;
 
