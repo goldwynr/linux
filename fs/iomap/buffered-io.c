@@ -1804,6 +1804,16 @@ iomap_can_add_to_ioend(struct iomap_writepage_ctx *wpc, loff_t offset,
 	if (sector != bio_end_sector(wpc->ioend->io_bio))
 		return false;
 	/*
+	 * Make sure ioend is the size of the iomap for IOMAP_ENCODED.
+	 */
+	if (wpc->iomap.type == IOMAP_ENCODED) {
+		if (wpc->iomap.offset == offset)
+			return false;
+		if (wpc->iomap.length <= wpc->ioend->io_size)
+			return false;
+	}
+
+	/*
 	 * Limit ioend bio chain lengths to minimise IO completion latency. This
 	 * also prevents long tight loops ending page writeback on all the
 	 * folios in the ioend.
