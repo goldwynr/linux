@@ -137,6 +137,9 @@ static noinline int run_delalloc_cow(struct btrfs_inode *inode,
 				     u64 start, u64 end,
 				     struct writeback_control *wbc,
 				     bool pages_dirty);
+static noinline int cow_file_range(struct btrfs_inode *inode,
+				   u64 start, u64 end,
+				   u64 *done_offset);
 static struct extent_map *create_io_em(struct btrfs_inode *inode, u64 start,
 				       u64 len, u64 orig_start, u64 block_start,
 				       u64 block_len, u64 orig_block_len,
@@ -955,19 +958,31 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 {
 	u64 start = async_extent->start;
 	u64 end = async_extent->end;
+	struct btrfs_bio *bbio = async_extent->bbio;
 	int ret;
-	struct writeback_control wbc = {
-		.sync_mode		= WB_SYNC_ALL,
-		.range_start		= start,
-		.range_end		= end,
-		.no_cgroup_owner	= 1,
-	};
+	int diff = 0;
 
-	wbc_attach_fdatawrite_inode(&wbc, &inode->vfs_inode);
-	ret = run_delalloc_cow(inode, start, end, &wbc, false);
-	wbc_detach_inode(&wbc);
-	if (ret < 0)
-		btrfs_cleanup_ordered_extents(inode, start, end - start + 1);
+	/*
+	 * Call cow_file_range() to run the delalloc range directly, since we
+	 * won't go to NOCOW or async path again.
+	 *
+	 * Also we call cow_file_range() with @unlock_page == 0, so that we
+	 * can directly submit them without interruption.
+	 */
+	ret = cow_file_range(inode, start, end, NULL);
+
+	if (ret < 0) {
+		btrfs_bio_end_io(bbio, errno_to_blk_status(ret));
+		return;
+	}
+
+	bbio->ordered = btrfs_lookup_ordered_extent(bbio->inode, bbio->file_offset);
+	refcount_inc(&bbio->ordered->refs);
+	diff = start - bbio->ordered->file_offset;
+	bbio->bio.bi_iter.bi_sector = (bbio->ordered->disk_bytenr + diff) >> SECTOR_SHIFT;
+	btrfs_submit_bio(bbio, 0);
+
+	return;
 }
 
 static int submit_async_extent(struct async_extent *async_extent)
@@ -991,6 +1006,8 @@ static int submit_async_extent(struct async_extent *async_extent)
 
 	if (async_extent->compress_type == BTRFS_COMPRESS_NONE) {
 		submit_uncompressed_range(inode, async_extent);
+		clear_extent_bits(&inode->io_tree, start, end,
+				EXTENT_LOCKED | EXTENT_DELALLOC);
 		goto done;
 	}
 
