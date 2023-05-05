@@ -1649,11 +1649,6 @@ static bool run_delalloc_compressed(struct btrfs_inode *inode,
 	for (i = 0; i < num_chunks; i++) {
 		u64 cur_end = min(end, start + SZ_512K - 1);
 
-		/*
-		 * igrab is called higher up in the call chain, take only the
-		 * lightweight reference for the callback lifetime
-		 */
-		ihold(&inode->vfs_inode);
 		async_chunk[i].async_cow = ctx;
 		async_chunk[i].inode = inode;
 		async_chunk[i].start = start;
