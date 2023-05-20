@@ -1772,10 +1772,14 @@ static struct iomap_ioend *iomap_alloc_ioend(struct iomap_writepage_ctx *wpc,
 {
 	struct iomap_ioend *ioend;
 	struct bio *bio;
+	struct bio_set *bioset = &iomap_ioend_bioset;
+
+	if (wpc->ops && wpc->ops->bio_set)
+		bioset = wpc->ops->bio_set;
 
 	bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS,
 			       REQ_OP_WRITE | wbc_to_write_flags(wbc),
-			       GFP_NOFS, &iomap_ioend_bioset);
+			       GFP_NOFS, bioset);
 	bio->bi_iter.bi_sector = iomap_sector(&wpc->iomap, pos);
 	bio->bi_end_io = iomap_writepage_end_bio;
 	wbc_init_bio(wbc, bio);
