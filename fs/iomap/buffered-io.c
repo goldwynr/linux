@@ -1756,10 +1756,19 @@ iomap_alloc_ioend(struct inode *inode, struct iomap_writepage_ctx *wpc,
 	bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS,
 			       REQ_OP_WRITE | wbc_to_write_flags(wbc),
 			       GFP_NOFS, &iomap_ioend_bioset);
+	ioend = container_of(bio, struct iomap_ioend, io_inline_bio);
+	/*
+	 * Allocate from bio_set, if provided, for filesystems requiring
+	 * to store additional informaiton in the bio
+	 * Note, this means ioend->inline_bio is not used.
+	 */
+	if (wpc->ops->bio_set)
+		bio = bio_alloc_bioset(wpc->iomap.bdev, BIO_MAX_VECS,
+				REQ_OP_WRITE | wbc_to_write_flags(wbc),
+				GFP_NOFS, wpc->ops->bio_set);
+
 	bio->bi_iter.bi_sector = sector;
 	wbc_init_bio(wbc, bio);
-
-	ioend = container_of(bio, struct iomap_ioend, io_inline_bio);
 	INIT_LIST_HEAD(&ioend->io_list);
 	ioend->io_type = wpc->iomap.type;
 	ioend->io_flags = wpc->iomap.flags;
@@ -1845,12 +1854,15 @@ iomap_add_to_ioend(struct inode *inode, loff_t pos, struct folio *folio,
 	size_t poff = offset_in_folio(folio, pos);
 
 	if (!wpc->ioend || !iomap_can_add_to_ioend(wpc, pos, sector)) {
+new_ioend:
 		if (wpc->ioend)
 			list_add(&wpc->ioend->io_list, iolist);
 		wpc->ioend = iomap_alloc_ioend(inode, wpc, pos, sector, wbc);
 	}
 
 	if (!bio_add_folio(wpc->ioend->io_bio, folio, len, poff)) {
+		if (wpc->ops->bio_set)
+			goto new_ioend;
 		wpc->ioend->io_bio = iomap_chain_bio(wpc);
 		bio_add_folio_nofail(wpc->ioend->io_bio, folio, len, poff);
 	}

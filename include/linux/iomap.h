@@ -348,6 +348,15 @@ struct iomap_writeback_ops {
 	 */
 	void (*submit_io)(struct iomap_ioend *ioend, struct bio *bio,
 			struct writeback_control *wbc);
+	/*
+	 * Filesystems wishing to attach private information to a writeback bio
+	 * must provide a ->submit_io method that attaches the additional
+	 * information to the bio and changes the ->bi_end_io callback to a
+	 * custom function.  This function should, at a minimum, perform any
+	 * relevant post-processing of the bio, including calling
+	 * folio_end_writeback() on all the folios
+	 */
+	struct bio_set *bio_set;
 };
 
 struct iomap_writepage_ctx {
