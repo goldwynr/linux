@@ -482,7 +482,6 @@ static int insert_inline_extent(struct btrfs_trans_handle *trans,
 {
 	struct btrfs_root *root = inode->root;
 	struct extent_buffer *leaf;
-	struct page *page = NULL;
 	char *kaddr;
 	unsigned long ptr;
 	struct btrfs_file_extent_item *ei;
@@ -539,12 +538,21 @@ static int insert_inline_extent(struct btrfs_trans_handle *trans,
 		btrfs_set_file_extent_compression(leaf, ei,
 						  compress_type);
 	} else {
-		page = find_get_page(inode->vfs_inode.i_mapping, 0);
+		struct folio *folio;
+		folio = filemap_lock_folio(inode->vfs_inode.i_mapping, 0);
+		if (IS_ERR(folio)) {
+			ret = PTR_ERR(folio);
+			goto fail;
+		}
+		folio_start_writeback(folio);
 		btrfs_set_file_extent_compression(leaf, ei, 0);
-		kaddr = kmap_local_page(page);
+		kaddr = kmap_local_folio(folio, 0);
 		write_extent_buffer(leaf, kaddr, ptr, size);
 		kunmap_local(kaddr);
-		put_page(page);
+		folio_unlock(folio);
+		folio_end_writeback(folio);
+		folio_clear_ordered(folio);
+		folio_put(folio);
 	}
 	btrfs_mark_buffer_dirty(trans, leaf);
 	btrfs_release_path(path);
