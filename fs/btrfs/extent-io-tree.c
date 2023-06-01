@@ -1876,6 +1876,35 @@ int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 	return err;
 }
 
+/*
+ * Either insert or lock state struct between start and end use mask to tell
+ * us if waiting is desired.
+ */
+int lock_extent_best_effort(struct extent_io_tree *tree, u64 start, u64 end,
+		u64 *locked_end, size_t min_size,
+		struct extent_state **cached_state)
+{
+	struct extent_state *failed_state = NULL;
+	int err;
+	u64 failed_start;
+
+	WARN_ON(start > end);
+again:
+	err = __set_extent_bit(tree, start, end, EXTENT_LOCKED, &failed_start,
+			       &failed_state, cached_state, NULL);
+	*locked_end = end;
+	if (err == -EEXIST) {
+		if (failed_start > start && failed_start - start >= min_size) {
+			*locked_end = failed_start - 1;
+			return 0;
+		}
+		wait_extent_bit(tree, start, start + min_size - 1,
+				EXTENT_LOCKED, &failed_state);
+		goto again;
+	}
+	return err;
+}
+
 void __cold extent_state_free_cachep(void)
 {
 	btrfs_extent_state_leak_debug_check();

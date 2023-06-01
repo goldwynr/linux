@@ -137,6 +137,9 @@ void extent_io_tree_release(struct extent_io_tree *tree);
 
 int lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 		struct extent_state **cached);
+int lock_extent_best_effort(struct extent_io_tree *tree, u64 start, u64 end,
+		u64 *locked_until, size_t min_size,
+		struct extent_state **cached);
 
 int try_lock_extent(struct extent_io_tree *tree, u64 start, u64 end,
 		    struct extent_state **cached);
