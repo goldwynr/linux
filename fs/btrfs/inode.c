@@ -7835,6 +7835,7 @@ static int btrfs_writepages(struct address_space *mapping,
 	int ret;
 	loff_t isize = i_size_read(inode);
 	int saved_range_cyclic = wbc->range_cyclic;
+	u64 saved_end, saved_start;
 	struct iomap_writepage_ctx wpc = {
 		.wbc	= wbc,
 	};
@@ -7847,38 +7848,51 @@ static int btrfs_writepages(struct address_space *mapping,
 		wbc->range_end = end;
 	} else {
 		start = round_down(wbc->range_start, PAGE_SIZE);
-		end = round_up(wbc->range_end, PAGE_SIZE) - 1;
+		if (wbc->range_end < isize)
+			end = round_up(wbc->range_end, PAGE_SIZE) - 1;
+		else
+			end = round_up(isize, PAGE_SIZE) - 1;
 	}
 
 	if (start >= end || isize == 0)
 		return 0;
 
-	lock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+	saved_end = end;
+	saved_start = start;
 
-	/*
-	 * Try writing inline first.
-	 * Most writebacks are more than BTRFS_MAX_INLINE_DATA_SIZE, so this
-	 * is likely to fail.
-	 */
-	if (start == 0 && i_blocksize(inode) == PAGE_SIZE) {
-		ret = cow_file_range_inline(BTRFS_I(inode), isize, 0,
-				BTRFS_COMPRESS_NONE, NULL, false);
-		if (ret == 0) {
-			clear_extent_bit(&BTRFS_I(inode)->io_tree, start, end,
-					EXTENT_LOCKED | EXTENT_DELALLOC |
-					EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
-					EXTENT_DO_ACCOUNTING, &cached);
-			goto out;
+	do {
+		lock_extent_best_effort(&BTRFS_I(inode)->io_tree, start, saved_end, &end, PAGE_SIZE, &cached);
+		wbc->range_end = end;
+
+		/*
+		 * Try writing inline first.
+		 * Most writebacks are more than BTRFS_MAX_INLINE_DATA_SIZE, so this
+		 * is likely to fail.
+		 */
+		if (start == 0 && i_blocksize(inode) == PAGE_SIZE) {
+			ret = cow_file_range_inline(BTRFS_I(inode), isize, 0,
+					BTRFS_COMPRESS_NONE, NULL, false);
+			if (ret == 0) {
+				clear_extent_bit(&BTRFS_I(inode)->io_tree, start, end,
+						EXTENT_LOCKED | EXTENT_DELALLOC |
+						EXTENT_DELALLOC_NEW | EXTENT_DEFRAG |
+						EXTENT_DO_ACCOUNTING, &cached);
+				goto out;
+			}
+			ret = 0;
 		}
-		ret = 0;
-	}
 
-	ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
+		ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
 
-	unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+		unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+		wbc->range_start = start = end + 1;
+		wbc->range_end = end = saved_end;
+	} while (end < saved_end);
 out:
 	if (saved_range_cyclic)
 		wbc->range_cyclic = 1;
+	wbc->range_end = saved_end;
+	wbc->range_start = saved_start;
 
 	return ret;
 }
