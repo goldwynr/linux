@@ -998,11 +998,13 @@ lock_and_cleanup_extent_if_need(struct btrfs_inode *inode,
 	u64 start_pos;
 	u64 last_pos;
 	int ret = 0;
+	u64 isize = inode->vfs_inode.i_size;
 
 	start_pos = round_down(pos, fs_info->sectorsize);
-	last_pos = round_up(pos + write_bytes, fs_info->sectorsize) - 1;
+	last_pos = min(pos + write_bytes, isize);
+	last_pos = round_up(last_pos, fs_info->sectorsize) - 1;
 
-	if (start_pos < inode->vfs_inode.i_size) {
+	if (start_pos < isize) {
 		struct btrfs_ordered_extent *ordered;
 
 		if (nowait) {
