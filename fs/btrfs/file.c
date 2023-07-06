@@ -1035,7 +1035,7 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 			srcmap->length = end - isize;
 		} else {
 			bi->em = btrfs_get_extent(BTRFS_I(inode), NULL,
-					pos - sector_offset, length);
+					pos - sector_offset, length, NULL);
 			if (IS_ERR(bi->em)) {
 				ret = PTR_ERR(bi->em);
 				kfree(bi);
@@ -1960,7 +1960,7 @@ static int find_first_non_hole(struct btrfs_inode *inode, u64 *start, u64 *len)
 
 	em = btrfs_get_extent(inode, NULL,
 			      round_down(*start, fs_info->sectorsize),
-			      round_up(*len, fs_info->sectorsize));
+			      round_up(*len, fs_info->sectorsize), NULL);
 	if (IS_ERR(em))
 		return PTR_ERR(em);
 
@@ -2575,7 +2575,7 @@ static int btrfs_zero_range_check_range_boundary(struct btrfs_inode *inode,
 	int ret;
 
 	offset = round_down(offset, sectorsize);
-	em = btrfs_get_extent(inode, NULL, offset, sectorsize);
+	em = btrfs_get_extent(inode, NULL, offset, sectorsize, NULL);
 	if (IS_ERR(em))
 		return PTR_ERR(em);
 
@@ -2607,7 +2607,7 @@ static int btrfs_zero_range(struct inode *inode,
 	bool space_reserved = false;
 
 	em = btrfs_get_extent(BTRFS_I(inode), NULL, alloc_start,
-			      alloc_end - alloc_start);
+			      alloc_end - alloc_start, NULL);
 	if (IS_ERR(em)) {
 		ret = PTR_ERR(em);
 		goto out;
@@ -2649,7 +2649,7 @@ static int btrfs_zero_range(struct inode *inode,
 
 	if (BTRFS_BYTES_TO_BLKS(fs_info, offset) ==
 	    BTRFS_BYTES_TO_BLKS(fs_info, offset + len - 1)) {
-		em = btrfs_get_extent(BTRFS_I(inode), NULL, alloc_start, sectorsize);
+		em = btrfs_get_extent(BTRFS_I(inode), NULL, alloc_start, sectorsize, NULL);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR(em);
 			goto out;
@@ -2842,7 +2842,7 @@ static long btrfs_fallocate(struct file *file, int mode,
 	/* First, check if we exceed the qgroup limit */
 	while (cur_offset < alloc_end) {
 		em = btrfs_get_extent(BTRFS_I(inode), NULL, cur_offset,
-				      alloc_end - cur_offset);
+				      alloc_end - cur_offset, NULL);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR(em);
 			break;
