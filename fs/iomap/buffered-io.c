@@ -317,7 +317,11 @@ static int iomap_read_inline_data(const struct iomap_iter *iter,
 	if (offset > 0)
 		ifs_alloc(iter->inode, folio, iter->flags);
 
-	folio_fill_tail(folio, offset, iomap->inline_data, size);
+	if (iomap->folio_ops && iomap->folio_ops->read_inline)
+		iomap->folio_ops->read_inline(iomap, folio);
+	else
+		folio_fill_tail(folio, offset, iomap->inline_data, size);
+
 	iomap_set_range_uptodate(folio, offset, folio_size(folio) - offset);
 	return 0;
 }
