@@ -2677,7 +2677,7 @@ static int btrfs_find_new_delalloc_bytes(struct btrfs_inode *inode,
 		u64 em_len;
 		int ret = 0;
 
-		em = btrfs_get_extent(inode, NULL, search_start, search_len);
+		em = btrfs_get_extent(inode, NULL, search_start, search_len, NULL);
 		if (IS_ERR(em))
 			return PTR_ERR(em);
 
@@ -4935,7 +4935,7 @@ int btrfs_cont_expand(struct btrfs_inode *inode, loff_t oldsize, loff_t size)
 					   &cached_state);
 	cur_offset = hole_start;
 	while (1) {
-		em = btrfs_get_extent(inode, NULL, cur_offset, block_end - cur_offset);
+		em = btrfs_get_extent(inode, NULL, cur_offset, block_end - cur_offset, NULL);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR(em);
 			em = NULL;
@@ -6795,7 +6795,8 @@ static int read_inline_extent(struct btrfs_inode *inode, struct btrfs_path *path
  * Return: ERR_PTR on error, non-NULL extent_map on success.
  */
 struct extent_map *btrfs_get_extent(struct btrfs_inode *inode,
-				    struct page *page, u64 start, u64 len)
+				    struct page *page, u64 start, u64 len,
+				    struct btrfs_path **path_ret)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 	int ret = 0;
@@ -6818,8 +6819,8 @@ struct extent_map *btrfs_get_extent(struct btrfs_inode *inode,
 	if (em) {
 		if (em->start > start || em->start + em->len <= start)
 			free_extent_map(em);
-		else if (em->block_start == EXTENT_MAP_INLINE && page)
-			free_extent_map(em);
+		else if (em->block_start == EXTENT_MAP_INLINE)
+			goto get_path;
 		else
 			goto out;
 	}
@@ -6832,7 +6833,7 @@ struct extent_map *btrfs_get_extent(struct btrfs_inode *inode,
 	em->orig_start = EXTENT_MAP_HOLE;
 	em->len = (u64)-1;
 	em->block_len = (u64)-1;
-
+get_path:
 	path = btrfs_alloc_path();
 	if (!path) {
 		ret = -ENOMEM;
@@ -6950,9 +6951,8 @@ next:
 		ASSERT(em->block_start == EXTENT_MAP_INLINE);
 		ASSERT(em->len == fs_info->sectorsize);
 
-		ret = read_inline_extent(inode, path, page);
-		if (ret < 0)
-			goto out;
+		if (path_ret)
+			*path_ret = path;
 		goto insert;
 	}
 not_found:
@@ -6962,7 +6962,8 @@ not_found:
 	em->block_start = EXTENT_MAP_HOLE;
 insert:
 	ret = 0;
-	btrfs_release_path(path);
+	if (!path_ret || extent_type != BTRFS_FILE_EXTENT_INLINE)
+		btrfs_release_path(path);
 	if (em->start > start || extent_map_end(em) <= start) {
 		btrfs_err(fs_info,
 			  "bad extent! em: [%llu %llu] passed [%llu %llu]",
@@ -6975,7 +6976,8 @@ insert:
 	ret = btrfs_add_extent_mapping(inode, &em, start, len);
 	write_unlock(&em_tree->lock);
 out:
-	btrfs_free_path(path);
+	if (!path_ret || extent_type != BTRFS_FILE_EXTENT_INLINE)
+		btrfs_free_path(path);
 
 	trace_btrfs_get_extent(root, inode, em);
 
@@ -7653,7 +7655,7 @@ static int btrfs_dio_iomap_begin(struct inode *inode, loff_t start,
 	if (ret < 0)
 		goto err;
 
-	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, len);
+	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, len, NULL);
 	if (IS_ERR(em)) {
 		ret = PTR_ERR(em);
 		goto unlock_err;
@@ -10083,7 +10085,7 @@ ssize_t btrfs_encoded_read(struct kiocb *iocb, struct iov_iter *iter,
 		cond_resched();
 	}
 
-	em = btrfs_get_extent(inode, NULL, start, lockend - start + 1);
+	em = btrfs_get_extent(inode, NULL, start, lockend - start + 1, NULL);
 	if (IS_ERR(em)) {
 		ret = PTR_ERR(em);
 		goto out_unlock_extent;
@@ -10665,7 +10667,7 @@ static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file,
 		struct btrfs_block_group *bg;
 		u64 len = isize - start;
 
-		em = btrfs_get_extent(BTRFS_I(inode), NULL, start, len);
+		em = btrfs_get_extent(BTRFS_I(inode), NULL, start, len, NULL);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR(em);
 			goto out;

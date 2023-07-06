@@ -1005,7 +1005,7 @@ static struct extent_map *__get_extent_map(struct inode *inode, struct page *pag
 		*em_cached = NULL;
 	}
 
-	em = btrfs_get_extent(BTRFS_I(inode), page, start, len);
+	em = btrfs_get_extent(BTRFS_I(inode), page, start, len, NULL);
 	if (!IS_ERR(em)) {
 		BUG_ON(*em_cached);
 		refcount_inc(&em->refs);
@@ -1179,7 +1179,7 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 	u64 start = round_down(pos, fs_info->sectorsize);
 	u64 end = round_up(pos + length, fs_info->sectorsize) - 1;
 
-	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1);
+	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1, NULL);
 	if (IS_ERR(em))
 		return PTR_ERR(em);
 
@@ -1447,7 +1447,7 @@ static noinline_for_stack int __extent_writepage_io(struct btrfs_inode *inode,
 			continue;
 		}
 
-		em = btrfs_get_extent(inode, NULL, cur, len);
+		em = btrfs_get_extent(inode, NULL, cur, len, NULL);
 		if (IS_ERR(em)) {
 			ret = PTR_ERR_OR_ZERO(em);
 			goto out_error;
