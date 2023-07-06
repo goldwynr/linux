@@ -6921,8 +6921,23 @@ static void btrfs_put_folio(struct inode *inode, loff_t pos,
 	folio_put(folio);
 }
 
+static int btrfs_iomap_read_inline(const struct iomap *iomap, struct folio *folio)
+{
+	struct btrfs_path *path = iomap->private;
+	struct inode *inode = folio->mapping->host;
+	int ret;
+
+	ret = read_inline_extent(BTRFS_I(inode), path, folio_page(folio, 0));
+	if (ret == 0)
+		folio_mark_uptodate(folio);
+	btrfs_release_path(path);
+	btrfs_free_path(path);
+	return ret;
+}
+
 const struct iomap_folio_ops btrfs_iomap_folio_ops = {
 	.put_folio = btrfs_put_folio,
+	.read_inline = btrfs_iomap_read_inline,
 };
 
 void btrfs_em_to_iomap(struct inode *inode,
@@ -7905,14 +7920,16 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	struct extent_map *em;
+	struct btrfs_path *path = NULL;
 	u64 start = round_down(pos, fs_info->sectorsize);
 	u64 end = round_up(pos + length, fs_info->sectorsize) - 1;
 
-	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1, NULL);
+	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1, &path);
 	if (IS_ERR(em))
 		return PTR_ERR(em);
 
 	btrfs_em_to_iomap(inode, em, iomap, start, false);
+	iomap->private = path;
 	free_extent_map(em);
 
 	return 0;
