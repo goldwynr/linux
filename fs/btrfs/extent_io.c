@@ -1577,31 +1577,24 @@ static int try_release_extent_state(struct extent_io_tree *tree,
 	u64 start = page_offset(page);
 	u64 end = start + PAGE_SIZE - 1;
 	int ret = 1;
-
-	if (test_range_bit_exists(tree, start, end, EXTENT_LOCKED)) {
-		ret = 0;
-	} else {
-		u32 clear_bits = ~(EXTENT_LOCKED | EXTENT_NODATASUM |
-				   EXTENT_DELALLOC_NEW | EXTENT_CTLBITS |
+	u32 clear_bits = ~(EXTENT_LOCKED | EXTENT_NODATASUM |
+			EXTENT_DELALLOC_NEW | EXTENT_CTLBITS |
 				   EXTENT_QGROUP_RESERVED);
 
-		/*
-		 * At this point we can safely clear everything except the
-		 * locked bit, the nodatasum bit and the delalloc new bit.
-		 * The delalloc new bit will be cleared by ordered extent
-		 * completion.
-		 */
-		ret = __clear_extent_bit(tree, start, end, clear_bits, NULL, NULL);
+	/*
+	 * At this point we can safely clear everything except the
+	 * locked bit, the nodatasum bit and the delalloc new bit.
+	 * The delalloc new bit will be cleared by ordered extent
+	 * completion.
+	 */
+	ret = __clear_extent_bit(tree, start, end, clear_bits, NULL, NULL);
 
-		/* if clear_extent_bit failed for enomem reasons,
-		 * we can't allow the release to continue.
-		 */
-		if (ret < 0)
-			ret = 0;
-		else
-			ret = 1;
-	}
-	return ret;
+	/* if clear_extent_bit failed for enomem reasons,
+	 * we can't allow the release to continue.
+	 */
+	if (ret < 0)
+		return 0;
+	return 1;
 }
 
 /*
