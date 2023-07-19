@@ -917,6 +917,7 @@ static void compress_file_range(struct btrfs_work *work)
 					start, end);
 
 			btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(ret));
+			async_extent->bbio = NULL;
 			goto free_pages;
 		}
 	}
@@ -969,6 +970,10 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 	struct btrfs_bio *bbio = async_extent->bbio;
 	int ret;
 	int diff = 0;
+
+	/* It was an inline extent, return 0 */
+	if (!bbio)
+		return;
 
 	/*
 	 * Call cow_file_range() to run the delalloc range directly, since we
