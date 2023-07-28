@@ -638,11 +638,9 @@ static void btrfs_double_extent_lock(struct inode *inode1, u64 loff1,
 		swap(range1_end, range2_end);
 	}
 
-	lock_extent(&BTRFS_I(inode1)->io_tree, loff1, range1_end, NULL);
-	lock_extent(&BTRFS_I(inode2)->io_tree, loff2, range2_end, NULL);
+	btrfs_lock_and_flush_ordered_range(BTRFS_I(inode1), loff1, range1_end, NULL);
+	btrfs_lock_and_flush_ordered_range(BTRFS_I(inode2), loff2, range2_end, NULL);
 
-	btrfs_assert_inode_range_clean(BTRFS_I(inode1), loff1, range1_end);
-	btrfs_assert_inode_range_clean(BTRFS_I(inode2), loff2, range2_end);
 }
 
 static void btrfs_double_mmap_lock(struct inode *inode1, struct inode *inode2)
@@ -728,7 +726,6 @@ static noinline int btrfs_clone_files(struct file *file, struct file *file_src,
 	struct inode *src = file_inode(file_src);
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
 	int ret;
-	int wb_ret;
 	u64 len = olen;
 	u64 bs = fs_info->sectorsize;
 
@@ -742,22 +739,7 @@ static noinline int btrfs_clone_files(struct file *file, struct file *file_src,
 		len = ALIGN(src->i_size, bs) - off;
 
 	if (destoff > inode->i_size) {
-		const u64 wb_start = ALIGN_DOWN(inode->i_size, bs);
-
 		ret = btrfs_cont_expand(BTRFS_I(inode), inode->i_size, destoff);
-		if (ret)
-			return ret;
-		/*
-		 * We may have truncated the last block if the inode's size is
-		 * not sector size aligned, so we need to wait for writeback to
-		 * complete before proceeding further, otherwise we can race
-		 * with cloning and attempt to increment a reference to an
-		 * extent that no longer exists (writeback completed right after
-		 * we found the previous extent covering eof and before we
-		 * attempted to increment its reference count).
-		 */
-		ret = btrfs_wait_ordered_range(inode, wb_start,
-					       destoff - wb_start);
 		if (ret)
 			return ret;
 	}
@@ -768,15 +750,8 @@ static noinline int btrfs_clone_files(struct file *file, struct file *file_src,
 	 */
 	btrfs_double_extent_lock(src, off, inode, destoff, len);
 	ret = btrfs_clone(src, inode, off, olen, len, destoff, 0);
-	btrfs_double_extent_unlock(src, off, inode, destoff, len);
+	unlock_extent(&BTRFS_I(src)->io_tree, off, off + len - 1, NULL);
 
-	/*
-	 * We may have copied an inline extent into a page of the destination
-	 * range, so wait for writeback to complete before truncating pages
-	 * from the page cache. This is a rare case.
-	 */
-	wb_ret = btrfs_wait_ordered_range(inode, destoff, len);
-	ret = ret ? ret : wb_ret;
 	/*
 	 * Truncate page cache pages so that future reads will see the cloned
 	 * data immediately and not the previous data.
@@ -784,6 +759,8 @@ static noinline int btrfs_clone_files(struct file *file, struct file *file_src,
 	truncate_inode_pages_range(&inode->i_data,
 				round_down(destoff, PAGE_SIZE),
 				round_up(destoff + len, PAGE_SIZE) - 1);
+
+	unlock_extent(&BTRFS_I(inode)->io_tree, destoff, destoff + len - 1, NULL);
 
 	btrfs_btree_balance_dirty(fs_info);
 
