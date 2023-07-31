@@ -1092,9 +1092,7 @@ static int submit_async_extent(struct async_extent *async_extent)
 	btrfs_dec_block_group_reservations(fs_info, ins.objectid);
 
 	/* Clear dirty, set writeback and unlock the pages. */
-	extent_clear_unlock_delalloc(inode, start, end,
-			NULL, EXTENT_LOCKED | EXTENT_DELALLOC,
-			PAGE_UNLOCK | PAGE_START_WRITEBACK);
+	clear_extent_bits(&inode->io_tree, start, end, EXTENT_LOCKED | EXTENT_DELALLOC);
 	btrfs_submit_compressed_write(ordered,
 			    async_extent->bbio,
 			    async_extent->pages,	/* compressed_pages */
@@ -1110,12 +1108,7 @@ out_free_reserve:
 	btrfs_free_reserved_extent(fs_info, ins.objectid, ins.offset, 1);
 out_free:
 	mapping_set_error(inode->vfs_inode.i_mapping, -EIO);
-	extent_clear_unlock_delalloc(inode, start, end,
-				     NULL, EXTENT_LOCKED | EXTENT_DELALLOC |
-				     EXTENT_DELALLOC_NEW |
-				     EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING,
-				     PAGE_UNLOCK | PAGE_START_WRITEBACK |
-				     PAGE_END_WRITEBACK);
+	clear_extent_bits(&inode->io_tree, start, end, EXTENT_LOCKED | EXTENT_DELALLOC | EXTENT_DELALLOC_NEW | EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING);
 	free_async_extent_pages(async_extent);
 	btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(ret));
 	goto done;
@@ -1367,7 +1360,6 @@ out_unlock:
 
 	clear_bits = EXTENT_DELALLOC | EXTENT_DELALLOC_NEW |
 		EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV;
-	page_ops = PAGE_UNLOCK | PAGE_START_WRITEBACK | PAGE_END_WRITEBACK;
 
 	/*
 	 * For the range (1). We have already instantiated the ordered extents
@@ -1384,8 +1376,6 @@ out_unlock:
 	if (keep_locked && orig_start < start) {
 		if (!locked_page)
 			mapping_set_error(inode->vfs_inode.i_mapping, ret);
-		extent_clear_unlock_delalloc(inode, orig_start, start - 1,
-					     locked_page, 0, page_ops);
 	}
 
 	/*
@@ -1399,11 +1389,9 @@ out_unlock:
 	 * therefore we do not pass it the flag EXTENT_CLEAR_DATA_RESV.
 	 */
 	if (extent_reserved) {
-		extent_clear_unlock_delalloc(inode, start,
+		clear_extent_bits(&inode->io_tree, start,
 					     start + cur_alloc_size - 1,
-					     locked_page,
-					     clear_bits,
-					     page_ops);
+					     clear_bits);
 		start += cur_alloc_size;
 	}
 
@@ -1415,8 +1403,7 @@ out_unlock:
 	 */
 	if (start < end) {
 		clear_bits |= EXTENT_CLEAR_DATA_RESV;
-		extent_clear_unlock_delalloc(inode, start, end, locked_page,
-					     clear_bits, page_ops);
+		clear_extent_bits(&inode->io_tree, start, end, clear_bits);
 	}
 	return ret;
 }
@@ -1589,7 +1576,7 @@ static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
 	 *
 	 * 2) We clear the EXTENT_NORESERVE bit from the range. We do this so
 	 *    that if the COW path fails for any reason, it decrements (through
-	 *    extent_clear_unlock_delalloc()) the bytes_may_use counter of the
+	 *    clear_extent_bits()) the bytes_may_use counter of the
 	 *    data space info, which we incremented in the step above.
 	 *
 	 * If we need to fallback to cow and the inode corresponds to a free
@@ -1992,11 +1979,9 @@ must_cow:
 			ret = btrfs_reloc_clone_csums(ordered);
 		btrfs_put_ordered_extent(ordered);
 
-		extent_clear_unlock_delalloc(inode, cur_offset, nocow_end,
-					     locked_page,
+		clear_extent_bits(&inode->io_tree, cur_offset, nocow_end,
 					     EXTENT_DELALLOC |
-					     EXTENT_CLEAR_DATA_RESV,
-					     PAGE_UNLOCK | PAGE_SET_ORDERED);
+					     EXTENT_CLEAR_DATA_RESV);
 
 		cur_offset = extent_end;
 
@@ -2035,12 +2020,9 @@ error:
 	if (cow_start != (u64)-1)
 		cur_offset = cow_start;
 	if (cur_offset < end)
-		extent_clear_unlock_delalloc(inode, cur_offset, end,
-					     locked_page,
+		clear_extent_bits(&inode->io_tree, cur_offset, end,
 					     EXTENT_DELALLOC | EXTENT_DEFRAG |
-					     EXTENT_DO_ACCOUNTING, PAGE_UNLOCK |
-					     PAGE_START_WRITEBACK |
-					     PAGE_END_WRITEBACK);
+					     EXTENT_DO_ACCOUNTING);
 	btrfs_free_path(path);
 	return ret;
 }
