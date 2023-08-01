@@ -134,8 +134,8 @@ static int btrfs_setsize(struct inode *inode, struct iattr *attr);
 static int btrfs_truncate(struct btrfs_inode *inode);
 
 static noinline int run_delalloc_cow(struct btrfs_inode *inode,
-				     struct page *locked_page, u64 start,
-				     u64 end, struct writeback_control *wbc,
+				     u64 start, u64 end,
+				     struct writeback_control *wbc,
 				     bool pages_dirty);
 static struct extent_map *create_io_em(struct btrfs_inode *inode, u64 start,
 				       u64 len, u64 orig_start, u64 block_start,
@@ -415,34 +415,13 @@ void btrfs_inode_unlock(struct btrfs_inode *inode, unsigned int ilock_flags)
  * extent (btrfs_finish_ordered_io()).
  */
 static inline void btrfs_cleanup_ordered_extents(struct btrfs_inode *inode,
-						 struct page *locked_page,
 						 u64 offset, u64 bytes)
 {
 	unsigned long index = offset >> PAGE_SHIFT;
 	unsigned long end_index = (offset + bytes - 1) >> PAGE_SHIFT;
-	u64 page_start = 0, page_end = 0;
 	struct page *page;
 
-	if (locked_page) {
-		page_start = page_offset(locked_page);
-		page_end = page_start + PAGE_SIZE - 1;
-	}
-
 	while (index <= end_index) {
-		/*
-		 * For locked page, we will call btrfs_mark_ordered_io_finished
-		 * through btrfs_mark_ordered_io_finished() on it
-		 * in run_delalloc_range() for the error handling, which will
-		 * clear page Ordered and run the ordered extent accounting.
-		 *
-		 * Here we can't just clear the Ordered bit, or
-		 * btrfs_mark_ordered_io_finished() would skip the accounting
-		 * for the page range, and the ordered extent will never finish.
-		 */
-		if (locked_page && index == (page_start >> PAGE_SHIFT)) {
-			index++;
-			continue;
-		}
 		page = find_get_page(inode->vfs_inode.i_mapping, index);
 		index++;
 		if (!page)
@@ -456,22 +435,6 @@ static inline void btrfs_cleanup_ordered_extents(struct btrfs_inode *inode,
 		btrfs_folio_clamp_clear_ordered(inode->root->fs_info,
 						page_folio(page), offset, bytes);
 		put_page(page);
-	}
-
-	if (locked_page) {
-		/* The locked page covers the full range, nothing needs to be done */
-		if (bytes + offset <= page_start + PAGE_SIZE)
-			return;
-		/*
-		 * In case this page belongs to the delalloc range being
-		 * instantiated then skip it, since the first page of a range is
-		 * going to be properly cleaned up by the caller of
-		 * run_delalloc_range
-		 */
-		if (page_start >= offset && page_end <= (offset + bytes - 1)) {
-			bytes = offset + bytes - page_offset(locked_page) - PAGE_SIZE;
-			offset = page_offset(locked_page) + PAGE_SIZE;
-		}
 	}
 
 	return btrfs_mark_ordered_io_finished(inode, NULL, offset, bytes, false);
@@ -988,8 +951,7 @@ static void free_async_extent_pages(struct async_extent *async_extent)
 }
 
 static void submit_uncompressed_range(struct btrfs_inode *inode,
-				      struct async_extent *async_extent,
-				      struct page *locked_page)
+				      struct async_extent *async_extent)
 {
 	u64 start = async_extent->start;
 	u64 end = async_extent->end;
@@ -1002,22 +964,10 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 	};
 
 	wbc_attach_fdatawrite_inode(&wbc, &inode->vfs_inode);
-	ret = run_delalloc_cow(inode, locked_page, start, end, &wbc, false);
+	ret = run_delalloc_cow(inode, start, end, &wbc, false);
 	wbc_detach_inode(&wbc);
-	if (ret < 0) {
-		btrfs_cleanup_ordered_extents(inode, locked_page, start, end - start + 1);
-		if (locked_page) {
-			const u64 page_start = page_offset(locked_page);
-
-			set_page_writeback(locked_page);
-			end_page_writeback(locked_page);
-			btrfs_mark_ordered_io_finished(inode, locked_page,
-						       page_start, PAGE_SIZE,
-						       !ret);
-			mapping_set_error(locked_page->mapping, ret);
-			unlock_page(locked_page);
-		}
-	}
+	if (ret < 0)
+		btrfs_cleanup_ordered_extents(inode, start, end - start + 1);
 }
 
 static int submit_async_extent(struct async_extent *async_extent)
@@ -1028,7 +978,6 @@ static int submit_async_extent(struct async_extent *async_extent)
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_ordered_extent *ordered;
 	struct btrfs_key ins;
-	struct page *locked_page = NULL;
 	struct extent_map *em;
 	int ret = 0;
 	u64 start = async_extent->start;
@@ -1041,7 +990,7 @@ static int submit_async_extent(struct async_extent *async_extent)
 	lock_extent(io_tree, start, end, NULL);
 
 	if (async_extent->compress_type == BTRFS_COMPRESS_NONE) {
-		submit_uncompressed_range(inode, async_extent, locked_page);
+		submit_uncompressed_range(inode, async_extent);
 		goto done;
 	}
 
@@ -1152,21 +1101,11 @@ static u64 get_extent_allocation_hint(struct btrfs_inode *inode, u64 start,
  * allocate extents on disk for the range, and create ordered data structs
  * in ram to track those extents.
  *
- * locked_page is the page that writepage had locked already.  We use
- * it to make sure we don't do extra locks or unlocks.
- *
- * When this function fails, it unlocks all pages except @locked_page.
- *
  * When this function successfully creates an inline extent, it returns 1 and
- * unlocks all pages including locked_page and starts I/O on them.
- * (In reality inline extents are limited to a single page, so locked_page is
- * the only page handled anyway).
+ * starts I/O on them.
  *
  * When this function succeed and creates a normal extent, the page locking
  * status depends on the passed in flags:
- *
- * - If @keep_locked is set, all pages are kept locked.
- * - Else all pages except for @locked_page are unlocked.
  *
  * When a failure happens in the second or later iteration of the
  * while-loop, the ordered extents created in previous iterations are kept
@@ -1175,9 +1114,8 @@ static u64 get_extent_allocation_hint(struct btrfs_inode *inode, u64 start,
  * example.
  */
 static noinline int cow_file_range(struct btrfs_inode *inode,
-				   struct page *locked_page, u64 start, u64 end,
-				   u64 *done_offset,
-				   bool keep_locked, bool no_inline)
+				   u64 start, u64 end,
+				   u64 *done_offset)
 {
 	struct btrfs_root *root = inode->root;
 	struct btrfs_fs_info *fs_info = root->fs_info;
@@ -1197,7 +1135,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 
 	if (btrfs_is_free_space_inode(inode)) {
 		ret = -EINVAL;
-		goto out_unlock;
+		goto out;
 	}
 
 	num_bytes = ALIGN(end - start + 1, blocksize);
@@ -1257,7 +1195,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 			ret = -ENOSPC;
 		}
 		if (ret < 0)
-			goto out_unlock;
+			goto out;
 		cur_alloc_size = ins.offset;
 		extent_reserved = true;
 
@@ -1292,7 +1230,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 			 * Only drop cache here, and process as normal.
 			 *
 			 * We must not allow extent_clear_unlock_delalloc()
-			 * at out_unlock label to free meta of this ordered
+			 * at out label to free meta of this ordered
 			 * extent, as its meta should be freed by
 			 * btrfs_finish_ordered_io().
 			 *
@@ -1309,18 +1247,13 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 		btrfs_dec_block_group_reservations(fs_info, ins.objectid);
 
 		/*
-		 * We're not doing compressed IO, don't unlock the first page
-		 * (which the caller expects to stay locked), don't clear any
-		 * dirty bits and don't set any writeback bits
-		 *
 		 * Do set the Ordered (Private2) bit so we know this page was
 		 * properly setup for writepage.
 		 */
-		page_ops = (keep_locked ? 0 : PAGE_UNLOCK);
-		page_ops |= PAGE_SET_ORDERED;
+		page_ops = PAGE_SET_ORDERED;
 
 		extent_clear_unlock_delalloc(inode, start, start + ram_size - 1,
-					     locked_page,
+					     NULL,
 					     EXTENT_DELALLOC,
 					     page_ops);
 		if (num_bytes < cur_alloc_size)
@@ -1333,11 +1266,11 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 
 		/*
 		 * btrfs_reloc_clone_csums() error, since start is increased
-		 * extent_clear_unlock_delalloc() at out_unlock label won't
+		 * extent_clear_unlock_delalloc() at out label won't
 		 * free metadata of current ordered extent, we're OK to exit.
 		 */
 		if (ret)
-			goto out_unlock;
+			goto out;
 	}
 	if (done_offset)
 		*done_offset = end;
@@ -1348,7 +1281,7 @@ out_drop_extent_cache:
 out_reserve:
 	btrfs_dec_block_group_reservations(fs_info, ins.objectid);
 	btrfs_free_reserved_extent(fs_info, ins.objectid, ins.offset, 1);
-out_unlock:
+out:
 	/*
 	 * Now, we have three regions to clean up:
 	 *
@@ -1360,23 +1293,6 @@ out_unlock:
 
 	clear_bits = EXTENT_DELALLOC | EXTENT_DELALLOC_NEW |
 		EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV;
-
-	/*
-	 * For the range (1). We have already instantiated the ordered extents
-	 * for this region. They are cleaned up by
-	 * btrfs_cleanup_ordered_extents() in e.g,
-	 * btrfs_run_delalloc_range(). EXTENT_LOCKED | EXTENT_DELALLOC are
-	 * already cleared in the above loop. And, EXTENT_DELALLOC_NEW |
-	 * EXTENT_DEFRAG | EXTENT_CLEAR_META_RESV are handled by the cleanup
-	 * function.
-	 *
-	 * However, in case of @keep_locked, we still need to unlock the pages
-	 * (except @locked_page) to ensure all the pages are unlocked.
-	 */
-	if (keep_locked && orig_start < start) {
-		if (!locked_page)
-			mapping_set_error(inode->vfs_inode.i_mapping, ret);
-	}
 
 	/*
 	 * For the range (2). If we reserved an extent for our delalloc range
@@ -1501,7 +1417,7 @@ static void writepages_async(struct iomap_ioend *ioend,
  * covered by the range.
  */
 static noinline int run_delalloc_cow(struct btrfs_inode *inode,
-				     struct page *locked_page, u64 start,
+				     u64 start,
 				     u64 end, struct writeback_control *wbc,
 				     bool pages_dirty)
 {
@@ -1509,11 +1425,10 @@ static noinline int run_delalloc_cow(struct btrfs_inode *inode,
 	int ret;
 
 	while (start <= end) {
-		ret = cow_file_range(inode, locked_page, start, end, &done_offset,
-				     true, false);
+		ret = cow_file_range(inode, start, end, &done_offset);
 		if (ret)
 			return ret;
-		extent_write_locked_range(&inode->vfs_inode, locked_page, start,
+		extent_write_locked_range(&inode->vfs_inode, start,
 					  done_offset, wbc, pages_dirty);
 		start = done_offset + 1;
 	}
@@ -1544,7 +1459,7 @@ static noinline int csum_exist_in_range(struct btrfs_fs_info *fs_info,
 	return 1;
 }
 
-static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
+static int fallback_to_cow(struct btrfs_inode *inode,
 			   const u64 start, const u64 end)
 {
 	const bool is_space_ino = btrfs_is_free_space_inode(inode);
@@ -1611,7 +1526,7 @@ static int fallback_to_cow(struct btrfs_inode *inode, struct page *locked_page,
 	 * is written out and unlocked directly and a normal NOCOW extent
 	 * doesn't work.
 	 */
-	ret = cow_file_range(inode, locked_page, start, end, NULL, false, true);
+	ret = cow_file_range(inode, start, end, NULL);
 	ASSERT(ret != 1);
 	return ret;
 }
@@ -1761,7 +1676,6 @@ static int can_nocow_file_extent(struct btrfs_path *path,
  * blocks on disk
  */
 static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
-				       struct page *locked_page,
 				       const u64 start, const u64 end)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
@@ -1923,7 +1837,7 @@ must_cow:
 		 * NOCOW, following one which needs to be COW'ed
 		 */
 		if (cow_start != (u64)-1) {
-			ret = fallback_to_cow(inode, locked_page,
+			ret = fallback_to_cow(inode,
 					      cow_start, found_key.offset - 1);
 			cow_start = (u64)-1;
 			if (ret) {
@@ -2002,7 +1916,7 @@ must_cow:
 
 	if (cow_start != (u64)-1) {
 		cur_offset = end;
-		ret = fallback_to_cow(inode, locked_page, cow_start, end);
+		ret = fallback_to_cow(inode, cow_start, end);
 		cow_start = (u64)-1;
 		if (ret)
 			goto error;
@@ -2042,35 +1956,26 @@ static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
  * Function to process delayed allocation (create CoW) for ranges which are
  * being touched for the first time.
  */
-int btrfs_run_delalloc_range(struct btrfs_inode *inode, struct page *locked_page,
+int btrfs_run_delalloc_range(struct btrfs_inode *inode,
 			     u64 start, u64 end, struct writeback_control *wbc)
 {
 	const bool zoned = btrfs_is_zoned(inode->root->fs_info);
 	int ret;
 
-	/*
-	 * The range must cover part of the @locked_page, or a return of 1
-	 * can confuse the caller.
-	 */
-	if (locked_page)
-		ASSERT(!(end <= page_offset(locked_page) ||
-			 start >= page_offset(locked_page) + PAGE_SIZE));
-
 	if (should_nocow(inode, start, end)) {
-		ret = run_delalloc_nocow(inode, locked_page, start, end);
+		ret = run_delalloc_nocow(inode, start, end);
 		goto out;
 	}
 
 	if (zoned)
-		ret = run_delalloc_cow(inode, locked_page, start, end, wbc,
+		ret = run_delalloc_cow(inode, start, end, wbc,
 				       true);
 	else
-		ret = cow_file_range(inode, locked_page, start, end, NULL,
-				     false, false);
+		ret = cow_file_range(inode, start, end, NULL);
 
 out:
 	if (ret < 0)
-		btrfs_cleanup_ordered_extents(inode, locked_page, start,
+		btrfs_cleanup_ordered_extents(inode, start,
 					      end - start + 1);
 	return ret;
 }
@@ -7828,7 +7733,7 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 		return 0;
 	}
 
-	ret = btrfs_run_delalloc_range(BTRFS_I(inode), NULL,
+	ret = btrfs_run_delalloc_range(BTRFS_I(inode),
 			start, end, wpc->wbc);
 	if (ret < 0)
 		return ret;
