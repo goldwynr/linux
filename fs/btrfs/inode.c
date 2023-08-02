@@ -782,8 +782,6 @@ static void compress_file_range(struct btrfs_work *work)
 	u64 blocksize = fs_info->sectorsize;
 	u64 start = async_extent->start;
 	u64 end = async_extent->end;
-	u64 actual_end;
-	u64 i_size;
 	int ret = 0;
 	struct page **pages;
 	unsigned long nr_pages;
@@ -794,44 +792,11 @@ static void compress_file_range(struct btrfs_work *work)
 
 	inode_should_defrag(inode, start, end, end - start + 1, SZ_16K);
 
-	/*
-	 * We need to call clear_page_dirty_for_io on each page in the range.
-	 * Otherwise applications with the file mmap'd can wander in and change
-	 * the page contents while we are compressing them.
-	 */
-	extent_range_clear_dirty_for_io(&inode->vfs_inode, start, end);
-
-	/*
-	 * We need to save i_size before now because it could change in between
-	 * us evaluating the size and assigning it.  This is because we lock and
-	 * unlock the page in truncate and fallocate, and then modify the i_size
-	 * later on.
-	 *
-	 * The barriers are to emulate READ_ONCE, remove that once i_size_read
-	 * does that for us.
-	 */
-	barrier();
-	i_size = i_size_read(&inode->vfs_inode);
-	barrier();
-	actual_end = min_t(u64, i_size, end + 1);
 	pages = NULL;
 	nr_pages = (end >> PAGE_SHIFT) - (start >> PAGE_SHIFT) + 1;
 	nr_pages = min_t(unsigned long, nr_pages, BTRFS_MAX_COMPRESSED_PAGES);
 
-	/*
-	 * we don't want to send crud past the end of i_size through
-	 * compression, that's just a waste of CPU time.  So, if the
-	 * end of the file is before the start of our current
-	 * requested range of bytes, we bail out to the uncompressed
-	 * cleanup code that can deal with all of this.
-	 *
-	 * It isn't really the fastest way to fix things, but this is a
-	 * very uncommon corner.
-	 */
-	if (actual_end <= start)
-		return;
-
-	total_compressed = actual_end - start;
+	total_compressed = end - start;
 
 	/*
 	 * Skip compression for a small file range(<=blocksize) that
@@ -848,13 +813,9 @@ static void compress_file_range(struct btrfs_work *work)
 	 */
 	if (blocksize < PAGE_SIZE) {
 		if (!PAGE_ALIGNED(start) ||
-		    !PAGE_ALIGNED(round_up(actual_end, blocksize)))
+		    !PAGE_ALIGNED(round_up(end, blocksize)))
 			return;
 	}
-
-	total_compressed = min_t(unsigned long, total_compressed,
-			BTRFS_MAX_UNCOMPRESSED);
-	ret = 0;
 
 	/*
 	 * We do compression for mount -o compress and when the inode has not
@@ -904,7 +865,7 @@ static void compress_file_range(struct btrfs_work *work)
 	 * extent for the subpage case.
 	 */
 	if (start == 0 && fs_info->sectorsize == PAGE_SIZE) {
-		ret = cow_file_range_inline(inode, actual_end,
+		ret = cow_file_range_inline(inode, end,
 				total_compressed,
 				compress_type, pages,
 				false);
