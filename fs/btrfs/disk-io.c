@@ -4243,6 +4243,8 @@ static void warn_about_uncommitted_trans(struct btrfs_fs_info *fs_info)
 void __cold close_ctree(struct btrfs_fs_info *fs_info)
 {
 	int ret;
+	struct btrfs_inode *inode = BTRFS_I(fs_info->btree_inode);
+	struct extent_state *cached_state = NULL;
 
 	set_bit(BTRFS_FS_CLOSING_START, &fs_info->flags);
 
@@ -4389,7 +4391,9 @@ void __cold close_ctree(struct btrfs_fs_info *fs_info)
 	 * we must make sure there is not any read request to
 	 * submit after we stopping all workers.
 	 */
+	lock_extent(&inode->io_tree, 0, -1ULL, &cached_state);
 	invalidate_inode_pages2(fs_info->btree_inode->i_mapping);
+	unlock_extent(&inode->io_tree, 0, -1ULL, &cached_state);
 	btrfs_stop_all_workers(fs_info);
 
 	/* We shouldn't have any transaction open at this point */
