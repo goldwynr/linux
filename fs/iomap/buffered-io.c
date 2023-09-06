@@ -44,6 +44,16 @@ struct iomap_folio_state {
 
 static struct bio_set iomap_ioend_bioset;
 
+static inline struct iomap_folio_state *to_folio_state(struct folio *folio)
+{
+	struct inode *inode = folio->mapping->host;
+
+	if (i_blocks_per_folio(inode, folio) <= 1)
+		return NULL;
+
+	return folio->private;
+}
+
 static inline bool ifs_is_fully_uptodate(struct folio *folio,
 		struct iomap_folio_state *ifs)
 {
@@ -73,7 +83,7 @@ static bool ifs_set_range_uptodate(struct folio *folio,
 static void iomap_set_range_uptodate(struct folio *folio, size_t off,
 		size_t len)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	unsigned long flags;
 	bool uptodate = true;
 
@@ -113,7 +123,7 @@ static void ifs_clear_range_dirty(struct folio *folio,
 
 static void iomap_clear_range_dirty(struct folio *folio, size_t off, size_t len)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 
 	if (ifs)
 		ifs_clear_range_dirty(folio, ifs, off, len);
@@ -136,7 +146,7 @@ static void ifs_set_range_dirty(struct folio *folio,
 
 static void iomap_set_range_dirty(struct folio *folio, size_t off, size_t len)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 
 	if (ifs)
 		ifs_set_range_dirty(folio, ifs, off, len);
@@ -145,7 +155,7 @@ static void iomap_set_range_dirty(struct folio *folio, size_t off, size_t len)
 static struct iomap_folio_state *ifs_alloc(struct inode *inode,
 		struct folio *folio, unsigned int flags)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	unsigned int nr_blocks = i_blocks_per_folio(inode, folio);
 	gfp_t gfp;
 
@@ -180,7 +190,7 @@ static struct iomap_folio_state *ifs_alloc(struct inode *inode,
 
 static void ifs_free(struct folio *folio)
 {
-	struct iomap_folio_state *ifs = folio_detach_private(folio);
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 
 	if (!ifs)
 		return;
@@ -197,7 +207,7 @@ static void ifs_free(struct folio *folio)
 static void iomap_adjust_read_range(struct inode *inode, struct folio *folio,
 		loff_t *pos, loff_t length, size_t *offp, size_t *lenp)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	loff_t orig_pos = *pos;
 	loff_t isize = i_size_read(inode);
 	unsigned block_bits = inode->i_blkbits;
@@ -254,7 +264,7 @@ static void iomap_adjust_read_range(struct inode *inode, struct folio *folio,
 static void iomap_finish_folio_read(struct folio *folio, size_t off,
 		size_t len, int error)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	bool uptodate = !error;
 	bool finished = true;
 
@@ -606,7 +616,7 @@ EXPORT_SYMBOL_GPL(iomap_readahead);
  */
 bool iomap_is_partially_uptodate(struct folio *folio, size_t from, size_t count)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	struct inode *inode = folio->mapping->host;
 	unsigned first, last, i;
 
@@ -1090,7 +1100,7 @@ static int iomap_write_delalloc_ifs_punch(struct inode *inode,
 	 * but not dirty. In that case it is necessary to punch
 	 * out such blocks to avoid leaking any delalloc blocks.
 	 */
-	ifs = folio->private;
+	ifs = to_folio_state(folio);
 	if (!ifs)
 		return ret;
 
@@ -1546,7 +1556,7 @@ EXPORT_SYMBOL_GPL(iomap_page_mkwrite);
 static void iomap_finish_folio_write(struct inode *inode, struct folio *folio,
 		size_t len, int error)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 
 	if (error) {
 		folio_set_error(folio);
@@ -1898,7 +1908,7 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 		struct writeback_control *wbc, struct inode *inode,
 		struct folio *folio, u64 end_pos)
 {
-	struct iomap_folio_state *ifs = folio->private;
+	struct iomap_folio_state *ifs = to_folio_state(folio);
 	struct iomap_ioend *ioend, *next;
 	unsigned len = i_blocksize(inode);
 	unsigned nblocks = i_blocks_per_folio(inode, folio);
