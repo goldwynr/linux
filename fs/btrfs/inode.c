@@ -7815,7 +7815,7 @@ static int btrfs_writepages(struct address_space *mapping,
 	u64 start = 0, end = LLONG_MAX;
 	struct inode *inode = mapping->host;
 	struct extent_state *cached = NULL;
-	int ret;
+	int ret = 0;
 	loff_t isize = i_size_read(inode);
 	int saved_range_cyclic = wbc->range_cyclic;
 	u64 saved_end, saved_start;
@@ -7848,6 +7848,13 @@ static int btrfs_writepages(struct address_space *mapping,
 		wbc->range_end = end;
 
 		/*
+		 * Skip writeback if another process wrote back for us
+		 * while we were waiting for the lock
+		 */
+		if (!filemap_range_needs_writeback(inode->i_mapping, start, end))
+			goto skip;
+
+		/*
 		 * Try writing inline first.
 		 * Most writebacks are more than BTRFS_MAX_INLINE_DATA_SIZE, so this
 		 * is likely to fail.
@@ -7866,7 +7873,7 @@ static int btrfs_writepages(struct address_space *mapping,
 		}
 
 		ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
-
+skip:
 		unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
 		wbc->range_start = start = end + 1;
 		wbc->range_end = end = saved_end;
