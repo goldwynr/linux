@@ -8033,6 +8033,31 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 	return btrfs_set_iomap(inode, offset, end - offset, &wpc->iomap);
 }
 
+static void btrfs_writepages_endio(struct btrfs_bio *bbio)
+{
+	struct iomap_ioend *ioend = bbio->private;
+	struct bio *bio = &bbio->bio;
+	struct inode *inode = ioend->io_inode;
+	struct folio_iter fi;
+	int error = blk_status_to_errno(bio->bi_status);
+
+	btrfs_mark_ordered_io_finished(BTRFS_I(inode), NULL, ioend->io_offset, ioend->io_size, !error);
+	bio_for_each_folio_all(fi, bio) {
+		folio_clear_ordered(fi.folio);
+		if (error)
+			folio_set_error(fi.folio);
+		folio_end_writeback(fi.folio);
+	}
+
+	if (error)
+		mapping_set_error(inode->i_mapping, error);
+
+	/* Release the btrfs_bio */
+	bio_put(bio);
+	/* Release the ioend structure */
+	bio_put(&ioend->io_inline_bio);
+}
+
 static const struct iomap_writeback_ops btrfs_writeback_ops = {
 	.map_blocks             = btrfs_map_blocks,
 };
