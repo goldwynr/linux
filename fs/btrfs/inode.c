@@ -8058,10 +8058,34 @@ static void btrfs_writepages_endio(struct btrfs_bio *bbio)
 	bio_put(&ioend->io_inline_bio);
 }
 
+static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioend *ioend, int status)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(ioend->io_inode->i_sb);
+	struct btrfs_bio *bbio = btrfs_bio(ioend->io_bio);
+
+	btrfs_bio_init(bbio, fs_info, btrfs_writepages_endio, ioend);
+	bbio->inode = BTRFS_I(ioend->io_inode);
+	bbio->file_offset = ioend->io_offset;
+	bbio->ordered = btrfs_lookup_ordered_extent(bbio->inode, bbio->file_offset);
+	if (!bbio->ordered)
+		return -ESRCH;
+
+	return status;
+}
+
+static void btrfs_writepages_submit_io(struct iomap_ioend *ioend,
+		struct bio *iomap_bio, struct writeback_control *wbc)
+{
+	struct btrfs_bio *bbio = btrfs_bio(iomap_bio);
+	btrfs_submit_bio(bbio, 0);
+}
+
 static const struct iomap_writeback_ops btrfs_writeback_ops = {
 	.map_blocks             = btrfs_map_blocks,
+	.prepare_ioend		= btrfs_prepare_ioend,
+	.submit_io		= btrfs_writepages_submit_io,
+	.bio_set		= &btrfs_bioset,
 };
-
 
 static int btrfs_writepages(struct address_space *mapping,
 			    struct writeback_control *wbc)
