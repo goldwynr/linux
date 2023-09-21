@@ -7821,6 +7821,7 @@ skip:
 out:
 	if (saved_range_cyclic)
 		wbc->range_cyclic = 1;
+
 	wbc->range_end = saved_end;
 	wbc->range_start = saved_start;
 
