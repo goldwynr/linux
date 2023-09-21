@@ -44,7 +44,6 @@ struct btrfs_iomap {
 	u64 lockstart;
 	u64 lockend;
 	struct extent_state *cached_state;
-	int extents_locked;
 
 	/* Source extent-map in order to read from in case not sector aligned */
 	struct extent_map *em;
@@ -798,44 +797,39 @@ lock_and_cleanup_extent_if_need(struct btrfs_inode *inode,
 				struct extent_state **cached_state)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
+	struct btrfs_ordered_extent *ordered;
 	u64 start_pos;
 	u64 last_pos;
 	int ret = 0;
-	u64 isize = inode->vfs_inode.i_size;
 
 	start_pos = round_down(pos, fs_info->sectorsize);
-	last_pos = min(pos + write_bytes, isize);
-	last_pos = round_up(last_pos, fs_info->sectorsize) - 1;
+	last_pos = round_up(pos + write_bytes, fs_info->sectorsize) - 1;
 
-	if (start_pos < isize) {
-		struct btrfs_ordered_extent *ordered;
 
-		if (nowait) {
-			if (!try_lock_extent(&inode->io_tree, start_pos, last_pos,
-					     cached_state))
-				return -EAGAIN;
-		} else {
-			lock_extent(&inode->io_tree, start_pos, last_pos, cached_state);
-		}
-
-		ordered = btrfs_lookup_ordered_range(inode, start_pos,
-						     last_pos - start_pos + 1);
-		if (ordered &&
-		    ordered->file_offset + ordered->num_bytes > start_pos &&
-		    ordered->file_offset <= last_pos) {
-			unlock_extent(&inode->io_tree, start_pos, last_pos,
-				      cached_state);
-			btrfs_start_ordered_extent(ordered);
-			btrfs_put_ordered_extent(ordered);
+	if (!try_lock_extent(&inode->io_tree, start_pos, last_pos,
+				cached_state)) {
+		if (nowait)
 			return -EAGAIN;
-		}
-		if (ordered)
-			btrfs_put_ordered_extent(ordered);
-
-		*lockstart = start_pos;
-		*lockend = last_pos;
-		ret = 1;
+		lock_extent(&inode->io_tree, start_pos, last_pos, cached_state);
 	}
+
+	ordered = btrfs_lookup_ordered_range(inode, start_pos,
+			last_pos - start_pos + 1);
+	if (ordered &&
+			ordered->file_offset + ordered->num_bytes > start_pos &&
+			ordered->file_offset <= last_pos) {
+		unlock_extent(&inode->io_tree, start_pos, last_pos,
+				cached_state);
+		btrfs_start_ordered_extent(ordered);
+		btrfs_put_ordered_extent(ordered);
+		return -EAGAIN;
+	}
+	if (ordered)
+		btrfs_put_ordered_extent(ordered);
+
+	*lockstart = start_pos;
+	*lockend = last_pos;
+	ret = 1;
 
 	return ret;
 }
@@ -1016,7 +1010,6 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 	if (!bi)
 		return -ENOMEM;
 
-	bi->extents_locked = false;
 	bi->cached_state = NULL;
 	bi->metadata_only = false;
 	len = (current->nr_dirtied_pause - current->nr_dirtied) << PAGE_SHIFT;
@@ -1098,12 +1091,10 @@ static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 	ret = lock_and_cleanup_extent_if_need(BTRFS_I(inode),
 			pos, write_bytes, &bi->lockstart, &bi->lockend,
 			nowait, &bi->cached_state);
-	if (ret < 0) {
+	if (ret < 0)
 		btrfs_delalloc_release_extents(BTRFS_I(inode), bi->reserved_bytes);
-	} else if (ret == 1) {
-		bi->extents_locked = true;
+	else if (ret == 1)
 		ret = 0;
-	}
 
 	iomap->private = bi;
 	iomap->length = round_up(write_bytes + sector_offset,
@@ -1146,8 +1137,7 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
         ret = btrfs_set_extent_delalloc(btrfs_inode, block_start, block_end,
                                         extra_bits, &bi->cached_state);
 
-	if (bi->extents_locked)
-		unlock_extent(&BTRFS_I(inode)->io_tree, bi->lockstart, bi->lockend, &bi->cached_state);
+	unlock_extent(&BTRFS_I(inode)->io_tree, bi->lockstart, bi->lockend, &bi->cached_state);
 
 	if (bi->metadata_only)
 		btrfs_check_nocow_unlock(BTRFS_I(inode));
