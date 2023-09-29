@@ -133,10 +133,6 @@ static struct kmem_cache *btrfs_inode_cachep;
 static int btrfs_setsize(struct inode *inode, struct iattr *attr);
 static int btrfs_truncate(struct btrfs_inode *inode);
 
-static noinline int run_delalloc_cow(struct btrfs_inode *inode,
-				     u64 start, u64 end,
-				     struct writeback_control *wbc,
-				     bool pages_dirty);
 static noinline int cow_file_range(struct btrfs_inode *inode,
 				   u64 start, u64 end,
 				   u64 *done_offset);
@@ -1403,30 +1399,6 @@ static void writepages_async(struct iomap_ioend *ioend,
 	btrfs_queue_work(fs_info->delalloc_workers, &async_extent->work);
 }
 
-/*
- * Run the delalloc range from start to end, and write back any dirty pages
- * covered by the range.
- */
-static noinline int run_delalloc_cow(struct btrfs_inode *inode,
-				     u64 start,
-				     u64 end, struct writeback_control *wbc,
-				     bool pages_dirty)
-{
-	u64 done_offset = end;
-	int ret;
-
-	while (start <= end) {
-		ret = cow_file_range(inode, start, end, &done_offset);
-		if (ret)
-			return ret;
-		extent_write_locked_range(&inode->vfs_inode, start,
-					  done_offset, wbc, pages_dirty);
-		start = done_offset + 1;
-	}
-
-	return 1;
-}
-
 static noinline int csum_exist_in_range(struct btrfs_fs_info *fs_info,
 					u64 bytenr, u64 num_bytes, bool nowait)
 {
@@ -1950,7 +1922,6 @@ static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
 int btrfs_run_delalloc_range(struct btrfs_inode *inode,
 			     u64 start, u64 end, struct writeback_control *wbc)
 {
-	const bool zoned = btrfs_is_zoned(inode->root->fs_info);
 	int ret;
 
 	if (should_nocow(inode, start, end)) {
@@ -1958,11 +1929,7 @@ int btrfs_run_delalloc_range(struct btrfs_inode *inode,
 		goto out;
 	}
 
-	if (zoned)
-		ret = run_delalloc_cow(inode, start, end, wbc,
-				       true);
-	else
-		ret = cow_file_range(inode, start, end, NULL);
+	ret = cow_file_range(inode, start, end, NULL);
 
 out:
 	if (ret < 0)
