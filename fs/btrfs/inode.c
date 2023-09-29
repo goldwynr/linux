@@ -1919,8 +1919,7 @@ static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
  * Function to process delayed allocation (create CoW) for ranges which are
  * being touched for the first time.
  */
-int btrfs_run_delalloc_range(struct btrfs_inode *inode,
-			     u64 start, u64 end, struct writeback_control *wbc)
+static int btrfs_run_delalloc_range(struct btrfs_inode *inode, u64 start, u64 end)
 {
 	int ret;
 
@@ -7708,8 +7707,7 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 		return 0;
 	}
 
-	ret = btrfs_run_delalloc_range(BTRFS_I(inode),
-			start, end, wpc->wbc);
+	ret = btrfs_run_delalloc_range(BTRFS_I(inode), start, end);
 	if (ret < 0)
 		return ret;
 	return btrfs_set_iomap(inode, offset, end - offset, &wpc->iomap);
