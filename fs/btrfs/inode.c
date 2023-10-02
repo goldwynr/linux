@@ -7648,6 +7648,37 @@ static int btrfs_set_iomap(struct inode *inode, loff_t pos,
         return 0;
 }
 
+static int btrfs_map_blocks_async(struct iomap_writepage_ctx *wpc,
+		struct inode *inode, u64 start)
+{
+	u64 end = 0;
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	size_t len;
+	int ret;
+
+	ret = find_delalloc_range(inode, &start, &end);
+	if (ret != 0)
+		return ret;
+
+	/*
+	 * Compression: Return a maximum of BTRFS_MAX_COMPRESSED iomap since
+	 * we have the disk address mapped only after pages are compressed.
+	 * This helps divide the writeback into 128k chunks automatically.
+	 */
+	len = end - start + 1;
+	wpc->iomap.offset = start;
+	wpc->iomap.type = IOMAP_ENCODED;
+	wpc->iomap.length = min((size_t)BTRFS_MAX_COMPRESSED, len);
+	/*
+	 * iomap.addr will not be used because btrfs makes
+	 * compressed_bio out of the bio returned by iomap code.
+	 * which has it's own extent and hence it's own sector
+	 */
+	wpc->iomap.addr = 0;
+	wpc->iomap.bdev = fs_info->fs_devices->latest_dev->bdev;
+	return 0;
+}
+
 static void btrfs_oe_to_iomap(struct inode *inode,
 		struct btrfs_ordered_extent *ordered, struct iomap *iomap)
 {
@@ -7674,6 +7705,10 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 			offset < wpc->iomap.offset + wpc->iomap.length)
 		return 0;
 
+	if (btrfs_test_opt(fs_info, COMPRESS) &&
+			btrfs_inode_can_compress(BTRFS_I(inode)))
+		return btrfs_map_blocks_async(wpc, inode, start);
+
 	/* Check if there is an existing ordered extent */
 	ordered = btrfs_lookup_ordered_extent(BTRFS_I(inode), offset);
 	if (ordered) {
@@ -7685,27 +7720,6 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 	ret = find_delalloc_range(inode, &start, &end);
 	if (ret != 0)
 		return ret;
-
-	/*
-	 * Compression: Return a maximum of BTRFS_MAX_COMPRESSED iomap since
-	 * we have the disk address mapped only after pages are compressed.
-	 * This helps divide the writeback into 128k chunks automatically.
-	 */
-	if (btrfs_test_opt(fs_info, COMPRESS) &&
-			btrfs_inode_can_compress(BTRFS_I(inode))) {
-		size_t len = end - start + 1;
-		wpc->iomap.offset = start;
-		wpc->iomap.type = IOMAP_ENCODED;
-		wpc->iomap.length = min((size_t)BTRFS_MAX_COMPRESSED, len);
-		/*
-		 * iomap.addr will not be used because btrfs makes
-		 * compressed_bio out of the bio returned by iomap code.
-		 * which has it's own extent and hence it's own sector
-		 */
-		wpc->iomap.addr = 0;
-		wpc->iomap.bdev = fs_info->fs_devices->latest_dev->bdev;
-		return 0;
-	}
 
 	ret = btrfs_run_delalloc_range(BTRFS_I(inode), start, end);
 	if (ret < 0)
