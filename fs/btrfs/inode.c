@@ -133,9 +133,8 @@ static struct kmem_cache *btrfs_inode_cachep;
 static int btrfs_setsize(struct inode *inode, struct iattr *attr);
 static int btrfs_truncate(struct btrfs_inode *inode);
 
-static noinline int cow_file_range(struct btrfs_inode *inode,
-				   u64 start, u64 end,
-				   u64 *done_offset);
+static noinline struct btrfs_ordered_extent *cow_file_range(struct btrfs_inode *inode,
+				   u64 start, u64 end);
 static struct extent_map *create_io_em(struct btrfs_inode *inode, u64 start,
 				       u64 len, u64 orig_start, u64 block_start,
 				       u64 block_len, u64 orig_block_len,
@@ -925,7 +924,7 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 	u64 start = async_extent->start;
 	u64 end = async_extent->end;
 	struct btrfs_bio *bbio = async_extent->bbio;
-	int ret;
+	struct btrfs_ordered_extent *ordered;
 	int diff = 0;
 
 	/* It was an inline extent, return 0 */
@@ -939,15 +938,15 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 	 * Also we call cow_file_range() with @unlock_page == 0, so that we
 	 * can directly submit them without interruption.
 	 */
-	ret = cow_file_range(inode, start, end, NULL);
-
-	if (ret < 0) {
-		btrfs_bio_end_io(bbio, errno_to_blk_status(ret));
+	ordered = cow_file_range(inode, start, end);
+	if (IS_ERR(ordered)) {
+		int error = PTR_ERR(ordered);
+		btrfs_bio_end_io(bbio, errno_to_blk_status(error));
 		return;
 	}
 
-	bbio->ordered = btrfs_lookup_ordered_extent(bbio->inode, bbio->file_offset);
-	refcount_inc(&bbio->ordered->refs);
+	refcount_inc(&ordered->refs);
+	bbio->ordered = ordered;
 	diff = start - bbio->ordered->file_offset;
 	bbio->bio.bi_iter.bi_sector = (bbio->ordered->disk_bytenr + diff) >> SECTOR_SHIFT;
 	btrfs_submit_bio(bbio, 0);
@@ -1100,14 +1099,12 @@ static u64 get_extent_allocation_hint(struct btrfs_inode *inode, u64 start,
  * btrfs_cleanup_ordered_extents(). See btrfs_run_delalloc_range() for
  * example.
  */
-static noinline int cow_file_range(struct btrfs_inode *inode,
-				   u64 start, u64 end,
-				   u64 *done_offset)
+static noinline struct btrfs_ordered_extent
+*cow_file_range(struct btrfs_inode *inode, u64 start, u64 end)
 {
 	struct btrfs_root *root = inode->root;
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	u64 alloc_hint = 0;
-	u64 orig_start = start;
 	u64 num_bytes;
 	unsigned long ram_size;
 	u64 cur_alloc_size = 0;
@@ -1118,6 +1115,7 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 	unsigned clear_bits;
 	unsigned long page_ops;
 	bool extent_reserved = false;
+	struct btrfs_ordered_extent *ordered = NULL;
 	int ret = 0;
 
 	if (btrfs_is_free_space_inode(inode)) {
@@ -1149,119 +1147,90 @@ static noinline int cow_file_range(struct btrfs_inode *inode,
 	else
 		min_alloc_size = fs_info->sectorsize;
 
-	while (num_bytes > 0) {
-		struct btrfs_ordered_extent *ordered;
 
-		cur_alloc_size = num_bytes;
-		ret = btrfs_reserve_extent(root, cur_alloc_size, cur_alloc_size,
-					   min_alloc_size, 0, alloc_hint,
-					   &ins, 1, 1);
-		if (ret == -EAGAIN) {
-			/*
-			 * btrfs_reserve_extent only returns -EAGAIN for zoned
-			 * file systems, which is an indication that there are
-			 * no active zones to allocate from at the moment.
-			 *
-			 * If this is the first loop iteration, wait for at
-			 * least one zone to finish before retrying the
-			 * allocation.  Otherwise ask the caller to write out
-			 * the already allocated blocks before coming back to
-			 * us, or return -ENOSPC if it can't handle retries.
-			 */
-			ASSERT(btrfs_is_zoned(fs_info));
-			if (start == orig_start) {
-				wait_on_bit_io(&inode->root->fs_info->flags,
-					       BTRFS_FS_NEED_ZONE_FINISH,
-					       TASK_UNINTERRUPTIBLE);
-				continue;
-			}
-			if (done_offset) {
-				*done_offset = start - 1;
-				return 0;
-			}
-			ret = -ENOSPC;
-		}
-		if (ret < 0)
-			goto out;
-		cur_alloc_size = ins.offset;
-		extent_reserved = true;
+	cur_alloc_size = num_bytes;
+	ret = btrfs_reserve_extent(root, cur_alloc_size, cur_alloc_size,
+			min_alloc_size, 0, alloc_hint,
+			&ins, 1, 1);
+	if (ret < 0)
+		goto out;
+	cur_alloc_size = ins.offset;
+	extent_reserved = true;
 
-		ram_size = ins.offset;
-		em = create_io_em(inode, start, ins.offset, /* len */
-				  start, /* orig_start */
-				  ins.objectid, /* block_start */
-				  ins.offset, /* block_len */
-				  ins.offset, /* orig_block_len */
-				  ram_size, /* ram_bytes */
-				  BTRFS_COMPRESS_NONE, /* compress_type */
-				  BTRFS_ORDERED_REGULAR /* type */);
-		if (IS_ERR(em)) {
-			ret = PTR_ERR(em);
-			goto out_reserve;
-		}
-		free_extent_map(em);
+	ram_size = ins.offset;
+	em = create_io_em(inode, start, ins.offset, /* len */
+			start, /* orig_start */
+			ins.objectid, /* block_start */
+			ins.offset, /* block_len */
+			ins.offset, /* orig_block_len */
+			ram_size, /* ram_bytes */
+			BTRFS_COMPRESS_NONE, /* compress_type */
+			BTRFS_ORDERED_REGULAR /* type */);
+	if (IS_ERR(em)) {
+		ret = PTR_ERR(em);
+		goto out_reserve;
+	}
+	free_extent_map(em);
 
-		ordered = btrfs_alloc_ordered_extent(inode, start, ram_size,
-					ram_size, ins.objectid, cur_alloc_size,
-					0, 1 << BTRFS_ORDERED_REGULAR,
-					BTRFS_COMPRESS_NONE);
-		if (IS_ERR(ordered)) {
-			ret = PTR_ERR(ordered);
-			goto out_drop_extent_cache;
-		}
+	ordered = btrfs_alloc_ordered_extent(inode, start, ram_size,
+			ram_size, ins.objectid, cur_alloc_size,
+			0, 1 << BTRFS_ORDERED_REGULAR,
+			BTRFS_COMPRESS_NONE);
+	if (IS_ERR(ordered)) {
+		ret = PTR_ERR(ordered);
+		goto out_drop_extent_cache;
+	}
 
-		if (btrfs_is_data_reloc_root(root)) {
-			ret = btrfs_reloc_clone_csums(ordered);
-
-			/*
-			 * Only drop cache here, and process as normal.
-			 *
-			 * We must not allow extent_clear_unlock_delalloc()
-			 * at out label to free meta of this ordered
-			 * extent, as its meta should be freed by
-			 * btrfs_finish_ordered_io().
-			 *
-			 * So we must continue until @start is increased to
-			 * skip current ordered extent.
-			 */
-			if (ret)
-				btrfs_drop_extent_map_range(inode, start,
-							    start + ram_size - 1,
-							    false);
-		}
-		btrfs_put_ordered_extent(ordered);
-
-		btrfs_dec_block_group_reservations(fs_info, ins.objectid);
+	if (btrfs_is_data_reloc_root(root)) {
+		ret = btrfs_reloc_clone_csums(ordered);
 
 		/*
-		 * Do set the Ordered (Private2) bit so we know this page was
-		 * properly setup for writepage.
-		 */
-		page_ops = PAGE_SET_ORDERED;
-
-		extent_clear_unlock_delalloc(inode, start, start + ram_size - 1,
-					     NULL,
-					     EXTENT_DELALLOC,
-					     page_ops);
-		if (num_bytes < cur_alloc_size)
-			num_bytes = 0;
-		else
-			num_bytes -= cur_alloc_size;
-		alloc_hint = ins.objectid + ins.offset;
-		start += cur_alloc_size;
-		extent_reserved = false;
-
-		/*
-		 * btrfs_reloc_clone_csums() error, since start is increased
-		 * extent_clear_unlock_delalloc() at out label won't
-		 * free metadata of current ordered extent, we're OK to exit.
+		 * Only drop cache here, and process as normal.
+		 *
+		 * We must not allow extent_clear_unlock_delalloc()
+		 * at out label to free meta of this ordered
+		 * extent, as its meta should be freed by
+		 * btrfs_finish_ordered_io().
+		 *
+		 * So we must continue until @start is increased to
+		 * skip current ordered extent.
 		 */
 		if (ret)
-			goto out;
+			btrfs_drop_extent_map_range(inode, start,
+					start + ram_size - 1,
+					false);
 	}
-	if (done_offset)
-		*done_offset = end;
-	return ret;
+	btrfs_put_ordered_extent(ordered);
+
+	btrfs_dec_block_group_reservations(fs_info, ins.objectid);
+
+	/*
+	 * Do set the Ordered (Private2) bit so we know this page was
+	 * properly setup for writepage.
+	 */
+	page_ops = PAGE_SET_ORDERED;
+
+	extent_clear_unlock_delalloc(inode, start, start + ram_size - 1,
+			NULL,
+			EXTENT_DELALLOC,
+			page_ops);
+	if (num_bytes < cur_alloc_size)
+		num_bytes = 0;
+	else
+		num_bytes -= cur_alloc_size;
+	alloc_hint = ins.objectid + ins.offset;
+	start += cur_alloc_size;
+	extent_reserved = false;
+
+	/*
+	 * btrfs_reloc_clone_csums() error, since start is increased
+	 * extent_clear_unlock_delalloc() at out label won't
+	 * free metadata of current ordered extent, we're OK to exit.
+	 */
+	if (ret)
+		goto out;
+
+	return ordered;
 
 out_drop_extent_cache:
 	btrfs_drop_extent_map_range(inode, start, start + ram_size - 1, false);
@@ -1308,7 +1277,7 @@ out:
 		clear_bits |= EXTENT_CLEAR_DATA_RESV;
 		clear_extent_bits(&inode->io_tree, start, end, clear_bits);
 	}
-	return ret;
+	return ERR_PTR(ret);
 }
 
 /*
@@ -1422,7 +1391,7 @@ static noinline int csum_exist_in_range(struct btrfs_fs_info *fs_info,
 	return 1;
 }
 
-static int fallback_to_cow(struct btrfs_inode *inode,
+static struct btrfs_ordered_extent *fallback_to_cow(struct btrfs_inode *inode,
 			   const u64 start, const u64 end)
 {
 	const bool is_space_ino = btrfs_is_free_space_inode(inode);
@@ -1431,7 +1400,6 @@ static int fallback_to_cow(struct btrfs_inode *inode,
 	struct extent_io_tree *io_tree = &inode->io_tree;
 	u64 range_start = start;
 	u64 count;
-	int ret;
 
 	/*
 	 * If EXTENT_NORESERVE is set it means that when the buffered write was
@@ -1489,9 +1457,7 @@ static int fallback_to_cow(struct btrfs_inode *inode,
 	 * is written out and unlocked directly and a normal NOCOW extent
 	 * doesn't work.
 	 */
-	ret = cow_file_range(inode, start, end, NULL);
-	ASSERT(ret != 1);
-	return ret;
+	return cow_file_range(inode, start, end);
 }
 
 struct can_nocow_file_extent_args {
@@ -1650,7 +1616,7 @@ static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
 	bool check_prev = true;
 	u64 ino = btrfs_ino(inode);
 	struct can_nocow_file_extent_args nocow_args = { 0 };
-
+	struct btrfs_ordered_extent *ordered;
 	/*
 	 * Normally on a zoned device we're only doing COW writes, but in case
 	 * of relocation on a zoned filesystem serializes I/O so that we're only
@@ -1669,7 +1635,6 @@ static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
 
 	while (1) {
 		struct btrfs_block_group *nocow_bg = NULL;
-		struct btrfs_ordered_extent *ordered;
 		struct btrfs_key found_key;
 		struct btrfs_file_extent_item *fi;
 		struct extent_buffer *leaf;
@@ -1800,11 +1765,12 @@ must_cow:
 		 * NOCOW, following one which needs to be COW'ed
 		 */
 		if (cow_start != (u64)-1) {
-			ret = fallback_to_cow(inode,
+			ordered = fallback_to_cow(inode,
 					      cow_start, found_key.offset - 1);
 			cow_start = (u64)-1;
-			if (ret) {
+			if (IS_ERR(ordered)) {
 				btrfs_dec_nocow_writers(nocow_bg);
+				ret = PTR_ERR(ordered);
 				goto error;
 			}
 		}
@@ -1879,10 +1845,12 @@ must_cow:
 
 	if (cow_start != (u64)-1) {
 		cur_offset = end;
-		ret = fallback_to_cow(inode, cow_start, end);
+		ordered = fallback_to_cow(inode, cow_start, end);
 		cow_start = (u64)-1;
-		if (ret)
+		if (IS_ERR(ordered)) {
+			ret = PTR_ERR(ordered);
 			goto error;
+		}
 	}
 
 	btrfs_free_path(path);
@@ -1921,20 +1889,19 @@ static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
  */
 static int btrfs_run_delalloc_range(struct btrfs_inode *inode, u64 start, u64 end)
 {
-	int ret;
+	struct btrfs_ordered_extent *ordered;
 
-	if (should_nocow(inode, start, end)) {
-		ret = run_delalloc_nocow(inode, start, end);
-		goto out;
-	}
+	if (should_nocow(inode, start, end))
+		return run_delalloc_nocow(inode, start, end);
 
-	ret = cow_file_range(inode, start, end, NULL);
-
-out:
-	if (ret < 0)
+	ordered = cow_file_range(inode, start, end);
+	if (IS_ERR(ordered)) {
 		btrfs_cleanup_ordered_extents(inode, start,
 					      end - start + 1);
-	return ret;
+		return PTR_ERR(ordered);
+	}
+
+	return 0;
 }
 
 void btrfs_split_delalloc_extent(struct btrfs_inode *inode,
