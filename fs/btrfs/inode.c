@@ -1604,7 +1604,7 @@ static int can_nocow_file_extent(struct btrfs_path *path,
  * If no cow copies or snapshots exist, we write directly to the existing
  * blocks on disk
  */
-static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
+static noinline struct btrfs_ordered_extent *run_delalloc_nocow(struct btrfs_inode *inode,
 				       const u64 start, const u64 end)
 {
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
@@ -1616,7 +1616,7 @@ static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
 	bool check_prev = true;
 	u64 ino = btrfs_ino(inode);
 	struct can_nocow_file_extent_args nocow_args = { 0 };
-	struct btrfs_ordered_extent *ordered;
+	struct btrfs_ordered_extent *ordered = NULL;
 	/*
 	 * Normally on a zoned device we're only doing COW writes, but in case
 	 * of relocation on a zoned filesystem serializes I/O so that we're only
@@ -1633,7 +1633,7 @@ static noinline int run_delalloc_nocow(struct btrfs_inode *inode,
 	nocow_args.end = end;
 	nocow_args.writeback_path = true;
 
-	while (1) {
+	while (!ordered) {
 		struct btrfs_block_group *nocow_bg = NULL;
 		struct btrfs_key found_key;
 		struct btrfs_file_extent_item *fi;
@@ -1767,12 +1767,12 @@ must_cow:
 		if (cow_start != (u64)-1) {
 			ordered = fallback_to_cow(inode,
 					      cow_start, found_key.offset - 1);
-			cow_start = (u64)-1;
+			btrfs_dec_nocow_writers(nocow_bg);
 			if (IS_ERR(ordered)) {
-				btrfs_dec_nocow_writers(nocow_bg);
 				ret = PTR_ERR(ordered);
 				goto error;
 			}
+			break;
 		}
 
 		nocow_end = cur_offset + nocow_args.num_bytes - 1;
@@ -1843,7 +1843,7 @@ must_cow:
 	if (cur_offset <= end && cow_start == (u64)-1)
 		cow_start = cur_offset;
 
-	if (cow_start != (u64)-1) {
+	if (!ordered && cow_start != (u64)-1) {
 		cur_offset = end;
 		ordered = fallback_to_cow(inode, cow_start, end);
 		cow_start = (u64)-1;
@@ -1854,7 +1854,7 @@ must_cow:
 	}
 
 	btrfs_free_path(path);
-	return 0;
+	return ordered;
 
 error:
 	/*
@@ -1869,7 +1869,7 @@ error:
 					     EXTENT_DELALLOC | EXTENT_DEFRAG |
 					     EXTENT_DO_ACCOUNTING);
 	btrfs_free_path(path);
-	return ret;
+	return ERR_PTR(ret);
 }
 
 static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
@@ -1887,21 +1887,12 @@ static bool should_nocow(struct btrfs_inode *inode, u64 start, u64 end)
  * Function to process delayed allocation (create CoW) for ranges which are
  * being touched for the first time.
  */
-static int btrfs_run_delalloc_range(struct btrfs_inode *inode, u64 start, u64 end)
+static struct btrfs_ordered_extent *btrfs_run_delalloc_range(struct btrfs_inode *inode, u64 start, u64 end)
 {
-	struct btrfs_ordered_extent *ordered;
-
 	if (should_nocow(inode, start, end))
 		return run_delalloc_nocow(inode, start, end);
 
-	ordered = cow_file_range(inode, start, end);
-	if (IS_ERR(ordered)) {
-		btrfs_cleanup_ordered_extents(inode, start,
-					      end - start + 1);
-		return PTR_ERR(ordered);
-	}
-
-	return 0;
+	return cow_file_range(inode, start, end);
 }
 
 void btrfs_split_delalloc_extent(struct btrfs_inode *inode,
@@ -7598,23 +7589,6 @@ static int find_delalloc_range(struct inode *inode, u64 *start, u64 *end)
 	return 0;
 }
 
-static int btrfs_set_iomap(struct inode *inode, loff_t pos,
-                loff_t length, struct iomap *srcmap)
-{
-        struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
-        loff_t sector_start = round_down(pos, fs_info->sectorsize);
-        struct extent_map *em;
-
-        em = btrfs_get_extent(BTRFS_I(inode), NULL, sector_start, length, NULL);
-        if (IS_ERR(em))
-                return PTR_ERR(em);
-
-        btrfs_em_to_iomap(inode, em, srcmap, sector_start, true);
-
-        free_extent_map(em);
-        return 0;
-}
-
 static int btrfs_map_blocks_async(struct iomap_writepage_ctx *wpc,
 		struct inode *inode, u64 start)
 {
@@ -7688,10 +7662,10 @@ static int btrfs_map_blocks(struct iomap_writepage_ctx *wpc,
 	if (ret != 0)
 		return ret;
 
-	ret = btrfs_run_delalloc_range(BTRFS_I(inode), start, end);
-	if (ret < 0)
-		return ret;
-	return btrfs_set_iomap(inode, offset, end - offset, &wpc->iomap);
+	ordered = btrfs_run_delalloc_range(BTRFS_I(inode), start, end);
+	btrfs_oe_to_iomap(inode, ordered, &wpc->iomap);
+
+	return 0;
 }
 
 static void btrfs_writepages_endio(struct btrfs_bio *bbio)
