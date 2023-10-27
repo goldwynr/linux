@@ -1483,7 +1483,7 @@ static int __btrfs_write_out_cache(struct inode *inode,
 	io_ctl->entries = entries;
 	io_ctl->bitmaps = bitmaps;
 
-	ret = btrfs_fdatawrite_range(inode, 0, (u64)-1);
+	ret = filemap_fdatawrite_range(inode->i_mapping, 0, (u64)-1);
 	if (ret)
 		goto out;
 
