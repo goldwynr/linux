@@ -2071,7 +2071,8 @@ static int iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 		if (!count)
 			folio_end_writeback(folio);
 	}
-	mapping_set_error(inode->i_mapping, error);
+	if (error < 0)
+		mapping_set_error(inode->i_mapping, error);
 	return error;
 }
 
