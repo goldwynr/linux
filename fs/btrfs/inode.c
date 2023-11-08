@@ -7693,6 +7693,12 @@ static void btrfs_writepages_endio(struct btrfs_bio *bbio)
 	bio_put(&ioend->io_inline_bio);
 }
 
+static void btrfs_error_endio(struct bio *bio)
+{
+	struct btrfs_bio *bbio = btrfs_bio(bio);
+	btrfs_bio_end_io(bbio, bio->bi_status);
+}
+
 static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioend *ioend, int status)
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(ioend->io_inode->i_sb);
@@ -7701,6 +7707,12 @@ static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioe
 	btrfs_bio_init(bbio, fs_info, btrfs_writepages_endio, ioend);
 	bbio->inode = BTRFS_I(ioend->io_inode);
 	bbio->file_offset = ioend->io_offset;
+
+	/*
+	 * Just until btrfs puts in the real end_io,
+	 * assigned primarily for error paths in iomap code.
+	 */
+	ioend->io_bio->bi_end_io = btrfs_error_endio;
 
 	return status;
 }
