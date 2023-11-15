@@ -730,6 +730,12 @@ static int iomap_read_folio_sync(loff_t block_start, struct folio *folio,
 	return submit_bio_wait(&bio);
 }
 
+static int fs_iomap_read_folio(struct folio *folio)
+{
+	struct inode *inode = folio->mapping->host;
+	return inode->i_mapping->a_ops->read_folio(NULL, folio);
+}
+
 static int __iomap_write_begin(const struct iomap_iter *iter, loff_t pos,
 		size_t len, struct folio *folio)
 {
@@ -782,8 +788,11 @@ static int __iomap_write_begin(const struct iomap_iter *iter, loff_t pos,
 			if (iter->flags & IOMAP_NOWAIT)
 				return -EAGAIN;
 
-			status = iomap_read_folio_sync(block_start, folio,
-					poff, plen, srcmap);
+			if (srcmap->type == IOMAP_ENCODED)
+				status = fs_iomap_read_folio(folio);
+			else
+				status = iomap_read_folio_sync(block_start, folio,
+						poff, plen, srcmap);
 			if (status)
 				return status;
 		}
