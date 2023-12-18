@@ -286,6 +286,15 @@ struct btrfs_inode {
 	struct inode vfs_inode;
 };
 
+struct btrfs_writeback {
+	struct inode *inode;
+	u64 start;
+	u64 end;
+	struct extent_state *cached_state;
+	struct btrfs_work work;
+	refcount_t refs;
+};
+
 extern const struct iomap_folio_ops btrfs_iomap_folio_ops;
 
 static inline u64 btrfs_get_first_dir_index_to_log(const struct btrfs_inode *inode)

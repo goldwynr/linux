@@ -957,7 +957,6 @@ static void submit_uncompressed_range(struct btrfs_inode *inode,
 static int submit_async_extent(struct async_extent *async_extent)
 {
 	struct btrfs_inode *inode = async_extent->inode;
-	struct extent_io_tree *io_tree = &inode->io_tree;
 	struct btrfs_root *root = inode->root;
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_ordered_extent *ordered;
@@ -971,12 +970,10 @@ static int submit_async_extent(struct async_extent *async_extent)
 	if (async_extent->blkcg_css)
 		kthread_associate_blkcg(async_extent->blkcg_css);
 
-	lock_extent(io_tree, start, end, NULL);
-
 	if (async_extent->compress_type == BTRFS_COMPRESS_NONE) {
 		submit_uncompressed_range(inode, async_extent);
 		clear_extent_bits(&inode->io_tree, start, end,
-				EXTENT_LOCKED | EXTENT_DELALLOC);
+				EXTENT_DELALLOC);
 		goto done;
 	}
 
@@ -1027,7 +1024,7 @@ static int submit_async_extent(struct async_extent *async_extent)
 	btrfs_dec_block_group_reservations(fs_info, ins.objectid);
 
 	/* Clear dirty, set writeback and unlock the pages. */
-	clear_extent_bits(&inode->io_tree, start, end, EXTENT_LOCKED | EXTENT_DELALLOC);
+	clear_extent_bits(&inode->io_tree, start, end, EXTENT_DELALLOC);
 	btrfs_submit_compressed_write(ordered,
 			    async_extent->bbio,
 			    async_extent->pages,	/* compressed_pages */
@@ -1043,7 +1040,7 @@ out_free_reserve:
 	btrfs_free_reserved_extent(fs_info, ins.objectid, ins.offset, 1);
 out_free:
 	mapping_set_error(inode->vfs_inode.i_mapping, -EIO);
-	clear_extent_bits(&inode->io_tree, start, end, EXTENT_LOCKED | EXTENT_DELALLOC | EXTENT_DELALLOC_NEW | EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING);
+	clear_extent_bits(&inode->io_tree, start, end, EXTENT_DELALLOC | EXTENT_DELALLOC_NEW | EXTENT_DEFRAG | EXTENT_DO_ACCOUNTING);
 	free_async_extent_pages(async_extent);
 	btrfs_bio_end_io(async_extent->bbio, errno_to_blk_status(ret));
 	goto done;
@@ -2711,9 +2708,6 @@ int btrfs_finish_one_ordered(struct btrfs_ordered_extent *ordered_extent)
 			btrfs_abort_transaction(trans, ret);
 		goto out;
 	}
-
-	clear_bits |= EXTENT_LOCKED;
-	lock_extent(io_tree, start, end, &cached_state);
 
 	if (freespace_inode)
 		trans = btrfs_join_transaction_spacecache(root);
@@ -7568,6 +7562,30 @@ static int btrfs_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 	return ret;
 }
 
+static void btrfs_writeback_unlock(struct btrfs_work *work)
+{
+	struct btrfs_writeback *bwb;
+
+	bwb = container_of(work, struct btrfs_writeback, work);
+	unlock_extent(&BTRFS_I(bwb->inode)->io_tree,
+			bwb->start, bwb->end, &bwb->cached_state);
+}
+
+static void btrfs_writeback_get(struct btrfs_writeback *bwb)
+{
+	refcount_inc(&bwb->refs);
+}
+
+static void btrfs_writeback_put(struct btrfs_writeback *bwb)
+{
+	if (refcount_dec_and_test(&bwb->refs)) {
+		struct btrfs_fs_info *fs_info = btrfs_sb(bwb->inode->i_sb);
+
+		btrfs_init_work(&bwb->work, btrfs_writeback_unlock, NULL);
+		btrfs_queue_work(fs_info->endio_write_workers, &bwb->work);
+	}
+}
+
 static int find_delalloc_range(struct inode *inode, u64 *start, u64 *end)
 {
 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
@@ -7674,6 +7692,7 @@ static void btrfs_writepages_endio(struct btrfs_bio *bbio)
 	struct bio *bio = &bbio->bio;
 	struct inode *inode = ioend->io_inode;
 	struct folio_iter fi;
+	struct btrfs_writeback *bwb = bbio->bwb;
 	int error = blk_status_to_errno(bio->bi_status);
 
 	btrfs_mark_ordered_io_finished(BTRFS_I(inode), NULL, ioend->io_offset, ioend->io_size, !error);
@@ -7691,6 +7710,7 @@ static void btrfs_writepages_endio(struct btrfs_bio *bbio)
 	bio_put(bio);
 	/* Release the ioend structure */
 	bio_put(&ioend->io_inline_bio);
+	btrfs_writeback_put(bwb);
 }
 
 static void btrfs_error_endio(struct bio *bio)
@@ -7703,10 +7723,13 @@ static int btrfs_prepare_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioe
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(ioend->io_inode->i_sb);
 	struct btrfs_bio *bbio = btrfs_bio(ioend->io_bio);
+	struct btrfs_writeback *bwb = wpc->fs_data;
 
+	btrfs_writeback_get(bwb);
 	btrfs_bio_init(bbio, fs_info, btrfs_writepages_endio, ioend);
 	bbio->inode = BTRFS_I(ioend->io_inode);
 	bbio->file_offset = ioend->io_offset;
+	bbio->bwb = bwb;
 
 	/*
 	 * Just until btrfs puts in the real end_io,
@@ -7741,6 +7764,40 @@ static const struct iomap_writeback_ops btrfs_writeback_ops = {
 	.bio_set		= &btrfs_bioset,
 };
 
+static struct btrfs_writeback *__btrfs_writepages(struct inode *inode, struct writeback_control *wbc, struct extent_state *cached_state)
+{
+	int ret = 0;
+	struct btrfs_writeback *bwb;
+	struct iomap_writepage_ctx wpc = {
+		.wbc	= wbc,
+	};
+
+	/*
+	 * Skip writeback if another process wrote back for us
+	 * while we were waiting for the lock
+	 */
+	if (!filemap_range_needs_writeback(inode->i_mapping, wbc->range_start, wbc->range_end)) {
+		unlock_extent(&BTRFS_I(inode)->io_tree, wbc->range_start, wbc->range_end, &cached_state);
+		return NULL;
+	}
+
+	bwb = kzalloc(sizeof(*bwb), GFP_NOFS);
+	bwb->start = wbc->range_start;
+	bwb->end = wbc->range_end;
+	bwb->inode = inode;
+	bwb->cached_state = cached_state;
+	refcount_set(&bwb->refs, 1);
+	wpc.fs_data = bwb;
+
+	ret = iomap_writepages(inode->i_mapping, &wpc, &btrfs_writeback_ops);
+	if (ret < 0) {
+		btrfs_writeback_put(bwb);
+		return ERR_PTR(ret);
+	}
+
+	return bwb;
+}
+
 static int btrfs_writepages(struct address_space *mapping,
 			    struct writeback_control *wbc)
 {
@@ -7751,9 +7808,7 @@ static int btrfs_writepages(struct address_space *mapping,
 	loff_t isize = i_size_read(inode);
 	int saved_range_cyclic = wbc->range_cyclic;
 	u64 saved_end, saved_start;
-	struct iomap_writepage_ctx wpc = {
-		.wbc	= wbc,
-	};
+	struct btrfs_writeback *bwb;
 
 	if (saved_range_cyclic) {
 		start = mapping->writeback_index << PAGE_SHIFT;
@@ -7780,13 +7835,6 @@ static int btrfs_writepages(struct address_space *mapping,
 		wbc->range_end = end;
 
 		/*
-		 * Skip writeback if another process wrote back for us
-		 * while we were waiting for the lock
-		 */
-		if (!filemap_range_needs_writeback(inode->i_mapping, start, end))
-			goto skip;
-
-		/*
 		 * Try writing inline first.
 		 * Most writebacks are more than BTRFS_MAX_INLINE_DATA_SIZE, so this
 		 * is likely to fail.
@@ -7804,9 +7852,10 @@ static int btrfs_writepages(struct address_space *mapping,
 			ret = 0;
 		}
 
-		ret = iomap_writepages(mapping, &wpc, &btrfs_writeback_ops);
-skip:
-		unlock_extent(&BTRFS_I(inode)->io_tree, start, end, &cached);
+		bwb = __btrfs_writepages(inode, wbc, cached);
+		if (!IS_ERR_OR_NULL(bwb))
+			btrfs_writeback_put(bwb);
+
 		wbc->range_start = start = end + 1;
 		wbc->range_end = end = saved_end;
 	} while (end < saved_end);

@@ -79,6 +79,7 @@ struct btrfs_bio {
 
 	/* File system that this I/O operates on. */
 	struct btrfs_fs_info *fs_info;
+	struct btrfs_writeback *bwb;
 
 	/*
 	 * This member must come last, bio_alloc_bioset will allocate enough
