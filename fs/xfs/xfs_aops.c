@@ -421,6 +421,7 @@ allocate_blocks:
 
 static int
 xfs_prepare_ioend(
+	struct iomap_writepage_ctx *wpc,
 	struct iomap_ioend	*ioend,
 	int			status)
 {

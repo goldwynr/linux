@@ -1748,7 +1748,7 @@ iomap_submit_ioend(struct iomap_writepage_ctx *wpc, struct iomap_ioend *ioend,
 	ioend->io_bio->bi_end_io = iomap_writepage_end_bio;
 
 	if (wpc->ops->prepare_ioend)
-		error = wpc->ops->prepare_ioend(ioend, error);
+		error = wpc->ops->prepare_ioend(wpc, ioend, error);
 	if (error) {
 		/*
 		 * If we're failing the IO now, just mark the ioend with an
