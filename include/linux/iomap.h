@@ -351,7 +351,7 @@ struct iomap_writeback_ops {
 	 * operations like copy on write extent manipulation or unwritten extent
 	 * conversions.
 	 */
-	int (*prepare_ioend)(struct iomap_ioend *ioend, int status);
+	int (*prepare_ioend)(struct iomap_writepage_ctx *wpc, int status);
 
 	/*
 	 * Optional, allows the file system to discard state on a page where
@@ -382,6 +382,7 @@ struct iomap_writepage_ctx {
 	struct writeback_control *wbc;
 	const struct iomap_writeback_ops *ops;
 	u32			nr_folios;	/* folios added to the ioend */
+	void			*fs_data;
 };
 
 void iomap_finish_ioends(struct iomap_ioend *ioend, int error);

@@ -422,9 +422,10 @@ allocate_blocks:
 
 static int
 xfs_prepare_ioend(
-	struct iomap_ioend	*ioend,
+	struct iomap_writepage_ctx *wpc,
 	int			status)
 {
+	struct iomap_ioend	*ioend = wpc->ioend;
 	unsigned int		nofs_flag;
 
 	/*

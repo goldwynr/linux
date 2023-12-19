@@ -1774,7 +1774,7 @@ static int iomap_submit_ioend(struct iomap_writepage_ctx *wpc, int error)
 	 * to clean up.
 	 */
 	if (wpc->ops->prepare_ioend)
-		error = wpc->ops->prepare_ioend(wpc->ioend, error);
+		error = wpc->ops->prepare_ioend(wpc, error);
 
 	if (error) {
 		wpc->ioend->io_bio.bi_status = errno_to_blk_status(error);
