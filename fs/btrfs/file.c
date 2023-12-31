@@ -2585,8 +2585,10 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 	struct extent_state *cached_state = NULL;
 	struct btrfs_path *path;
 	struct btrfs_trans_handle *trans = NULL;
-	u64 lockstart;
-	u64 lockend;
+	u64 lockstart = round_down(offset, fs_info->sectorsize);
+	u64 lockend = round_up(offset + len, fs_info->sectorsize);
+	u64 block_start;
+	u64 block_end;
 	u64 tail_start;
 	u64 tail_len;
 	u64 orig_start = offset;
@@ -2598,26 +2600,25 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 
 	btrfs_inode_lock(BTRFS_I(inode), BTRFS_ILOCK_MMAP);
 
-	ret = btrfs_wait_ordered_range(inode, offset, len);
-	if (ret)
-		goto out_only_mutex;
+	btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), lockstart, lockend,
+			&cached_state);
 
 	ino_size = round_up(inode->i_size, fs_info->sectorsize);
 	ret = find_first_non_hole(BTRFS_I(inode), &offset, &len);
 	if (ret < 0)
-		goto out_only_mutex;
+		goto out;
 	if (ret && !len) {
 		/* Already in a large hole */
 		ret = 0;
-		goto out_only_mutex;
+		goto out;
 	}
 
 	ret = file_modified(file);
 	if (ret)
-		goto out_only_mutex;
+		goto out;
 
-	lockstart = round_up(offset, fs_info->sectorsize);
-	lockend = round_down(offset + len, fs_info->sectorsize) - 1;
+	block_start = round_up(offset, fs_info->sectorsize);
+	block_end = round_down(offset + len, fs_info->sectorsize) - 1;
 	same_block = (BTRFS_BYTES_TO_BLKS(fs_info, offset))
 		== (BTRFS_BYTES_TO_BLKS(fs_info, offset + len - 1));
 	/*
@@ -2636,7 +2637,7 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 		} else {
 			ret = 0;
 		}
-		goto out_only_mutex;
+		goto out;
 	}
 
 	/* zero back part of the first block */
@@ -2655,25 +2656,25 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 	 * the extra check can be skipped */
 	if (offset == orig_start) {
 		/* after truncate page, check hole again */
-		len = offset + len - lockstart;
-		offset = lockstart;
+		len = offset + len - block_start;
+		offset = block_start;
 		ret = find_first_non_hole(BTRFS_I(inode), &offset, &len);
 		if (ret < 0)
-			goto out_only_mutex;
+			goto out;
 		if (ret && !len) {
 			ret = 0;
-			goto out_only_mutex;
+			goto out;
 		}
-		lockstart = offset;
+		block_start = offset;
 	}
 
 	/* Check the tail unaligned part is in a hole */
-	tail_start = lockend + 1;
+	tail_start = block_end + 1;
 	tail_len = offset + len - tail_start;
 	if (tail_len) {
 		ret = find_first_non_hole(BTRFS_I(inode), &tail_start, &tail_len);
 		if (unlikely(ret < 0))
-			goto out_only_mutex;
+			goto out;
 		if (!ret) {
 			/* zero the front end of the last page */
 			if (tail_start + tail_len < ino_size) {
@@ -2682,17 +2683,17 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 							tail_start + tail_len,
 							0, 1);
 				if (ret)
-					goto out_only_mutex;
+					goto out;
 			}
 		}
 	}
 
-	if (lockend < lockstart) {
+	if (block_end < block_start) {
 		ret = 0;
-		goto out_only_mutex;
+		goto out;
 	}
 
-	btrfs_punch_hole_lock_range(inode, lockstart, lockend, &cached_state);
+	truncate_pagecache_range(inode, block_start, block_end);
 
 	path = btrfs_alloc_path();
 	if (!path) {
@@ -2700,8 +2701,8 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 		goto out;
 	}
 
-	ret = btrfs_replace_file_extents(BTRFS_I(inode), path, lockstart,
-					 lockend, NULL, &trans);
+	ret = btrfs_replace_file_extents(BTRFS_I(inode), path, block_start,
+					 block_end, NULL, &trans);
 	btrfs_free_path(path);
 	if (ret)
 		goto out;
@@ -2716,7 +2717,6 @@ static int btrfs_punch_hole(struct file *file, loff_t offset, loff_t len)
 out:
 	unlock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend,
 		      &cached_state);
-out_only_mutex:
 	if (!updated_inode && truncated_block && !ret) {
 		/*
 		 * If we only end up zeroing part of a page, we still need to
