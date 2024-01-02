@@ -2180,48 +2180,6 @@ static int find_first_non_hole(struct btrfs_inode *inode, u64 *start, u64 *len)
 	return ret;
 }
 
-static void btrfs_punch_hole_lock_range(struct inode *inode,
-					const u64 lockstart,
-					const u64 lockend,
-					struct extent_state **cached_state)
-{
-	/*
-	 * For subpage case, if the range is not at page boundary, we could
-	 * have pages at the leading/tailing part of the range.
-	 * This could lead to dead loop since filemap_range_has_page()
-	 * will always return true.
-	 * So here we need to do extra page alignment for
-	 * filemap_range_has_page().
-	 */
-	const u64 page_lockstart = round_up(lockstart, PAGE_SIZE);
-	const u64 page_lockend = round_down(lockend + 1, PAGE_SIZE) - 1;
-
-	while (1) {
-		btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), lockstart,
-				lockend, cached_state);
-
-		truncate_pagecache_range(inode, lockstart, lockend);
-		/*
-		 * We can't have ordered extents in the range, nor dirty/writeback
-		 * pages, because we have locked the inode's VFS lock in exclusive
-		 * mode, we have locked the inode's i_mmap_lock in exclusive mode,
-		 * we have flushed all delalloc in the range and we have waited
-		 * for any ordered extents in the range to complete.
-		 * We can race with anyone reading pages from this range, so after
-		 * locking the range check if we have pages in the range, and if
-		 * we do, unlock the range and retry.
-		 */
-		if (!filemap_range_has_page(inode->i_mapping, page_lockstart,
-					    page_lockend))
-			break;
-
-		unlock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend,
-			      cached_state);
-	}
-
-	btrfs_assert_inode_range_clean(BTRFS_I(inode), lockstart, lockend);
-}
-
 static int btrfs_insert_replace_extent(struct btrfs_trans_handle *trans,
 				     struct btrfs_inode *inode,
 				     struct btrfs_path *path,
@@ -2970,7 +2928,6 @@ static int btrfs_zero_range(struct inode *inode,
 
 reserve_space:
 	if (alloc_start < alloc_end) {
-		struct extent_state *cached_state = NULL;
 		const u64 lockstart = alloc_start;
 		const u64 lockend = alloc_end - 1;
 
@@ -2980,21 +2937,15 @@ reserve_space:
 		if (ret < 0)
 			goto out;
 		space_reserved = true;
-		btrfs_punch_hole_lock_range(inode, lockstart, lockend,
-					    &cached_state);
+		truncate_pagecache_range(inode, lockstart, lockend);
 		ret = btrfs_qgroup_reserve_data(BTRFS_I(inode), &data_reserved,
 						alloc_start, bytes_to_reserve);
-		if (ret) {
-			unlock_extent(&BTRFS_I(inode)->io_tree, lockstart,
-				      lockend, &cached_state);
+		if (ret)
 			goto out;
-		}
 		ret = btrfs_prealloc_file_range(inode, mode, alloc_start,
 						alloc_end - alloc_start,
 						fs_info->sectorsize,
 						offset + len, &alloc_hint);
-		unlock_extent(&BTRFS_I(inode)->io_tree, lockstart, lockend,
-			      &cached_state);
 		/* btrfs_prealloc_file_range releases reserved space on error */
 		if (ret) {
 			space_reserved = false;
@@ -3062,6 +3013,9 @@ static long btrfs_fallocate(struct file *file, int mode,
 	if (ret)
 		goto out;
 
+	locked_end = alloc_end - 1;
+	btrfs_lock_and_flush_ordered_range(BTRFS_I(inode), alloc_start, locked_end, &cached_state);
+
 	/*
 	 * TODO: Move these two operations after we have checked
 	 * accurate reserved space, or fallocate can still fail but
@@ -3073,7 +3027,7 @@ static long btrfs_fallocate(struct file *file, int mode,
 		ret = btrfs_cont_expand(BTRFS_I(inode), i_size_read(inode),
 					alloc_start);
 		if (ret)
-			goto out;
+			goto out_unlock;
 	} else if (offset + len > inode->i_size) {
 		/*
 		 * If we are fallocating from the end of the file onward we
@@ -3082,33 +3036,13 @@ static long btrfs_fallocate(struct file *file, int mode,
 		 */
 		ret = btrfs_truncate_block(BTRFS_I(inode), inode->i_size, 0, 0);
 		if (ret)
-			goto out;
+			goto out_unlock;
 	}
-
-	/*
-	 * We have locked the inode at the VFS level (in exclusive mode) and we
-	 * have locked the i_mmap_lock lock (in exclusive mode). Now before
-	 * locking the file range, flush all dealloc in the range and wait for
-	 * all ordered extents in the range to complete. After this we can lock
-	 * the file range and, due to the previous locking we did, we know there
-	 * can't be more delalloc or ordered extents in the range.
-	 */
-	ret = btrfs_wait_ordered_range(inode, alloc_start,
-				       alloc_end - alloc_start);
-	if (ret)
-		goto out;
 
 	if (mode & FALLOC_FL_ZERO_RANGE) {
 		ret = btrfs_zero_range(inode, offset, len, mode);
-		btrfs_inode_unlock(BTRFS_I(inode), BTRFS_ILOCK_MMAP);
-		return ret;
+		goto out_unlock;
 	}
-
-	locked_end = alloc_end - 1;
-	lock_extent(&BTRFS_I(inode)->io_tree, alloc_start, locked_end,
-		    &cached_state);
-
-	btrfs_assert_inode_range_clean(BTRFS_I(inode), alloc_start, locked_end);
 
 	/* First, check if we exceed the qgroup limit */
 	while (cur_offset < alloc_end) {
