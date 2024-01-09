@@ -2050,8 +2050,11 @@ static int iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 	while ((rlen = iomap_find_dirty_range(folio, &pos, end_pos))) {
 		error = iomap_writepage_map_blocks(wpc, wbc, folio, inode,
 				pos, rlen, &count);
-		if (error)
+		if (error) {
+			if (error == AOP_WRITEPAGE_ACTIVATE)
+				goto done;
 			break;
+		}
 		pos += rlen;
 	}
 
@@ -2080,6 +2083,7 @@ static int iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 		if (!count)
 			folio_end_writeback(folio);
 	}
+done:
 	if (error < 0)
 		mapping_set_error(inode->i_mapping, error);
 	return error;
