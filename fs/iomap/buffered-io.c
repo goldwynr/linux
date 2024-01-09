@@ -1944,8 +1944,11 @@ iomap_writepage_map(struct iomap_writepage_ctx *wpc,
 			continue;
 
 		error = wpc->ops->map_blocks(wpc, inode, pos);
-		if (error)
+		if (error) {
+			if (error == AOP_WRITEPAGE_ACTIVATE)
+				goto done;
 			break;
+		}
 		trace_iomap_writepage_map(inode, &wpc->iomap);
 		if (WARN_ON_ONCE(wpc->iomap.type == IOMAP_INLINE))
 			continue;
