@@ -365,151 +365,6 @@ void btrfs_submit_compressed_write(struct btrfs_ordered_extent *ordered,
 }
 
 /*
- * Add extra pages in the same compressed file extent so that we don't need to
- * re-read the same extent again and again.
- *
- * NOTE: this won't work well for subpage, as for subpage read, we lock the
- * full page then submit bio for each compressed/regular extents.
- *
- * This means, if we have several sectors in the same page points to the same
- * on-disk compressed data, we will re-read the same extent many times and
- * this function can only help for the next page.
- */
-static noinline int add_ra_bio_pages(struct inode *inode,
-				     u64 compressed_end,
-				     struct compressed_bio *cb,
-				     int *memstall, unsigned long *pflags)
-{
-	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
-	unsigned long end_index;
-	struct bio *orig_bio = &cb->orig_bbio->bio;
-	u64 cur = cb->orig_bbio->file_offset + orig_bio->bi_iter.bi_size;
-	u64 isize = i_size_read(inode);
-	int ret;
-	struct page *page;
-	struct extent_map *em;
-	struct address_space *mapping = inode->i_mapping;
-	struct extent_map_tree *em_tree;
-	int sectors_missed = 0;
-
-	em_tree = &BTRFS_I(inode)->extent_tree;
-
-	if (isize == 0)
-		return 0;
-
-	/*
-	 * For current subpage support, we only support 64K page size,
-	 * which means maximum compressed extent size (128K) is just 2x page
-	 * size.
-	 * This makes readahead less effective, so here disable readahead for
-	 * subpage for now, until full compressed write is supported.
-	 */
-	if (fs_info->sectorsize < PAGE_SIZE)
-		return 0;
-
-	end_index = (i_size_read(inode) - 1) >> PAGE_SHIFT;
-
-	while (cur < compressed_end) {
-		u64 page_end;
-		u64 pg_index = cur >> PAGE_SHIFT;
-		u32 add_size;
-
-		if (pg_index > end_index)
-			break;
-
-		page = xa_load(&mapping->i_pages, pg_index);
-		if (page && !xa_is_value(page)) {
-			sectors_missed += (PAGE_SIZE - offset_in_page(cur)) >>
-					  fs_info->sectorsize_bits;
-
-			/* Beyond threshold, no need to continue */
-			if (sectors_missed > 4)
-				break;
-
-			/*
-			 * Jump to next page start as we already have page for
-			 * current offset.
-			 */
-			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
-			continue;
-		}
-
-		page = __page_cache_alloc(mapping_gfp_constraint(mapping,
-								 ~__GFP_FS));
-		if (!page)
-			break;
-
-		if (add_to_page_cache_lru(page, mapping, pg_index, GFP_NOFS)) {
-			put_page(page);
-			/* There is already a page, skip to page end */
-			cur = (pg_index << PAGE_SHIFT) + PAGE_SIZE;
-			continue;
-		}
-
-		if (!*memstall && PageWorkingset(page)) {
-			psi_memstall_enter(pflags);
-			*memstall = 1;
-		}
-
-		ret = set_page_extent_mapped(page);
-		if (ret < 0) {
-			unlock_page(page);
-			put_page(page);
-			break;
-		}
-
-		page_end = (pg_index << PAGE_SHIFT) + PAGE_SIZE - 1;
-		read_lock(&em_tree->lock);
-		em = lookup_extent_mapping(em_tree, cur, page_end + 1 - cur);
-		read_unlock(&em_tree->lock);
-
-		/*
-		 * At this point, we have a locked page in the page cache for
-		 * these bytes in the file.  But, we have to make sure they map
-		 * to this compressed extent on disk.
-		 */
-		if (!em || cur < em->start ||
-		    (cur + fs_info->sectorsize > extent_map_end(em)) ||
-		    (em->block_start >> SECTOR_SHIFT) != orig_bio->bi_iter.bi_sector) {
-			free_extent_map(em);
-			unlock_page(page);
-			put_page(page);
-			break;
-		}
-		free_extent_map(em);
-
-		if (page->index == end_index) {
-			size_t zero_offset = offset_in_page(isize);
-
-			if (zero_offset) {
-				int zeros;
-				zeros = PAGE_SIZE - zero_offset;
-				memzero_page(page, zero_offset, zeros);
-			}
-		}
-
-		add_size = min(em->start + em->len, page_end + 1) - cur;
-		ret = bio_add_page(orig_bio, page, add_size, offset_in_page(cur));
-		if (ret != add_size) {
-			unlock_page(page);
-			put_page(page);
-			break;
-		}
-		/*
-		 * If it's subpage, we also need to increase its
-		 * subpage::readers number, as at endio we will decrease
-		 * subpage::readers and to unlock the page.
-		 */
-		if (fs_info->sectorsize < PAGE_SIZE)
-			btrfs_subpage_start_reader(fs_info, page_folio(page),
-						   cur, add_size);
-		put_page(page);
-		cur += add_size;
-	}
-	return 0;
-}
-
-/*
  * for a compressed read, the bio we get passed has all the inode pages
  * in it.  We don't actually do IO on those pages but allocate new ones
  * to hold the compressed pages on disk.
@@ -528,8 +383,6 @@ void btrfs_submit_compressed_read(struct btrfs_bio *bbio)
 	struct compressed_bio *cb;
 	unsigned int compressed_len;
 	u64 file_offset = bbio->file_offset;
-	u64 em_len;
-	u64 em_start;
 	struct extent_map *em;
 	unsigned long pflags;
 	int memstall = 0;
@@ -552,9 +405,6 @@ void btrfs_submit_compressed_read(struct btrfs_bio *bbio)
 				  end_bbio_comprssed_read);
 
 	cb->start = em->orig_start;
-	em_len = em->len;
-	em_start = em->start;
-
 	cb->len = bbio->bio.bi_iter.bi_size;
 	cb->compressed_len = compressed_len;
 	cb->compress_type = extent_map_compression(em);
@@ -574,9 +424,6 @@ void btrfs_submit_compressed_read(struct btrfs_bio *bbio)
 		ret = BLK_STS_RESOURCE;
 		goto out_free_compressed_pages;
 	}
-
-	add_ra_bio_pages(&inode->vfs_inode, em_start + em_len, cb, &memstall,
-			 &pflags);
 
 	/* include any pages we added in add_ra-bio_pages */
 	cb->len = bbio->bio.bi_iter.bi_size;
