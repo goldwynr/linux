@@ -154,9 +154,6 @@ struct list_head *zlib_get_workspace(unsigned int level);
 
 ssize_t lzo_compress_bio(struct list_head *ws, struct bio *bio,
                struct page **pages, unsigned long *out_pages);
-int lzo_compress_pages(struct list_head *ws, struct address_space *mapping,
-		u64 start, struct page **pages, unsigned long *out_pages,
-		unsigned long *total_in, unsigned long *total_out);
 int lzo_decompress_bio(struct list_head *ws, struct compressed_bio *cb);
 int lzo_decompress(struct list_head *ws, const u8 *data_in,
 		struct page *dest_page, unsigned long dest_pgoff, size_t srclen,
