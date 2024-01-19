@@ -412,7 +412,7 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 	workspace->in_buf.size = min_t(size_t, len, PAGE_SIZE);
 
 	/* Allocate and map in the output buffer */
-	out_page = btrfs_alloc_compr_page();
+	out_page = &btrfs_alloc_compr_folio()->page;
 	if (out_page == NULL) {
 		ret = -ENOMEM;
 		goto out;
@@ -457,7 +457,7 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 				ret = -E2BIG;
 				goto out;
 			}
-			out_page = btrfs_alloc_compr_page();
+			out_page = &btrfs_alloc_compr_folio()->page;
 			if (out_page == NULL) {
 				ret = -ENOMEM;
 				goto out;
@@ -514,7 +514,7 @@ int zstd_compress_pages(struct list_head *ws, struct address_space *mapping,
 			ret = -E2BIG;
 			goto out;
 		}
-		out_page = btrfs_alloc_compr_page();
+		out_page = &btrfs_alloc_compr_folio()->page;
 		if (out_page == NULL) {
 			ret = -ENOMEM;
 			goto out;
