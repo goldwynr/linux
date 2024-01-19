@@ -574,7 +574,7 @@ void btrfs_submit_compressed_read(struct btrfs_bio *bbio)
 	unsigned long pflags;
 	int memstall = 0;
 	blk_status_t ret;
-	int ret2;
+	int i;
 
 	/* we need the actual starting offset of this extent in the file */
 	read_lock(&em_tree->lock);
@@ -609,10 +609,13 @@ void btrfs_submit_compressed_read(struct btrfs_bio *bbio)
 		goto out_free_bio;
 	}
 
-	ret2 = btrfs_alloc_page_array(cb->nr_pages, cb->compressed_pages, 0);
-	if (ret2) {
-		ret = BLK_STS_RESOURCE;
-		goto out_free_compressed_pages;
+	for (i = 0; i < cb->nr_pages; i++) {
+		struct folio *folio = btrfs_alloc_compr_folio();
+		if (IS_ERR(folio)) {
+			ret = BLK_STS_RESOURCE;
+			goto out_free_compressed_pages;
+		}
+		cb->compressed_pages[i] = &folio->page;
 	}
 
 	add_ra_bio_pages(&inode->vfs_inode, em_start + em_len, cb, &memstall,
