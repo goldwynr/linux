@@ -830,6 +830,32 @@ TRACE_EVENT(btrfs_buffered_iomap_end,
 		  )
 );
 
+TRACE_EVENT(btrfs_writepages,
+
+	TP_PROTO(const struct inode *inode, u64 start, u64 end),
+
+	TP_ARGS(inode, start, end),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,	ino		)
+		__field(	u64,	start		)
+		__field(	u64,	 end		)
+	),
+
+	TP_fast_assign(
+		TP_fast_assign_fsid(btrfs_sb(inode->i_sb));
+		__entry->ino		= inode->i_ino;
+		__entry->start		= start;
+		__entry->end		= end;
+	),
+
+	TP_printk_btrfs("ino=%llu start=%llu end=%llu",
+		  __entry->ino,
+		  __entry->start,
+		  __entry->end
+		  )
+);
+
 TRACE_EVENT(btrfs_sync_file,
 
 	TP_PROTO(const struct file *file, int datasync),

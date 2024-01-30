@@ -7789,6 +7789,7 @@ static struct btrfs_writeback *__btrfs_writepages(struct inode *inode, struct wr
 	refcount_set(&bwb->refs, 1);
 	wpc.fs_data = bwb;
 
+	trace_btrfs_writepages(inode, bwb->start, bwb->end);
 	ret = iomap_writepages(inode->i_mapping, &wpc, &btrfs_writeback_ops);
 	if (ret < 0) {
 		btrfs_writeback_put(bwb);
