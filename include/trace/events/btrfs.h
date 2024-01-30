@@ -772,6 +772,64 @@ TRACE_EVENT(btrfs_writepage_end_io_hook,
 		  __entry->end, __entry->uptodate)
 );
 
+TRACE_EVENT(btrfs_buffered_iomap_begin,
+
+	TP_PROTO(const struct inode *inode, loff_t pos, loff_t length, loff_t write_bytes),
+
+	TP_ARGS(inode, pos, length, write_bytes),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,	ino		)
+		__field(	loff_t,	pos		)
+		__field(	loff_t, length		)
+		__field(	loff_t, write_bytes	)
+	),
+
+	TP_fast_assign(
+		TP_fast_assign_fsid(btrfs_sb(inode->i_sb));
+		__entry->ino		= inode->i_ino;
+		__entry->pos		= pos;
+		__entry->length		= length;
+		__entry->write_bytes	= write_bytes;
+	),
+
+	TP_printk_btrfs("ino=%llu pos=%llu length=%llu/%llu",
+		  __entry->ino,
+		  __entry->pos,
+		  __entry->length,
+		  __entry->write_bytes
+		  )
+);
+
+TRACE_EVENT(btrfs_buffered_iomap_end,
+
+	TP_PROTO(const struct inode *inode, loff_t pos, loff_t length, loff_t written),
+
+	TP_ARGS(inode, pos, length, written),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,	ino		)
+		__field(	loff_t,	pos		)
+		__field(	loff_t, length		)
+		__field(	loff_t, written		)
+	),
+
+	TP_fast_assign(
+		TP_fast_assign_fsid(btrfs_sb(inode->i_sb));
+		__entry->ino		= inode->i_ino;
+		__entry->pos		= pos;
+		__entry->length		= length;
+		__entry->written	= written;
+	),
+
+	TP_printk_btrfs("ino=%llu pos=%llu length=%llu/%llu",
+		  __entry->ino,
+		  __entry->pos,
+		  __entry->length,
+		  __entry->written
+		  )
+);
+
 TRACE_EVENT(btrfs_sync_file,
 
 	TP_PROTO(const struct file *file, int datasync),
@@ -790,6 +848,7 @@ TRACE_EVENT(btrfs_sync_file,
 		const struct inode *inode = d_inode(dentry);
 
 		TP_fast_assign_fsid(btrfs_sb(file->f_path.dentry->d_sb));
+
 		__entry->ino		= btrfs_ino(BTRFS_I(inode));
 		__entry->parent		= btrfs_ino(BTRFS_I(d_inode(dentry->d_parent)));
 		__entry->datasync	= datasync;
