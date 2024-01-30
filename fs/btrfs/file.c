@@ -1100,6 +1100,8 @@ again:
 		ret = 0;
 	}
 
+	trace_btrfs_buffered_iomap_begin(inode, pos, length, write_bytes);
+
 	iomap->private = bi;
 	iomap->length = round_up(write_bytes + sector_offset,
 			fs_info->sectorsize);
@@ -1184,6 +1186,7 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
 		release_bytes = bi->reserved_bytes - block_len;
 	}
 
+	trace_btrfs_buffered_iomap_end(inode, pos, length, written);
 	btrfs_iomap_release(BTRFS_I(inode), block_start, release_bytes, bi);
 	return ret;
 }
