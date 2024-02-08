@@ -772,6 +772,41 @@ TRACE_EVENT(btrfs_writepage_end_io_hook,
 		  __entry->end, __entry->uptodate)
 );
 
+TRACE_EVENT(btrfs_read_iomap_begin,
+
+	TP_PROTO(const struct inode *inode, loff_t req_pos, loff_t req_len, loff_t ret_pos, loff_t ret_len, int type),
+
+	TP_ARGS(inode, req_pos, req_len, ret_pos, ret_len, type),
+
+	TP_STRUCT__entry_btrfs(
+		__field(	u64,	ino		)
+		__field(	loff_t,	req_pos		)
+		__field(	loff_t, req_len		)
+		__field(	loff_t,	ret_pos		)
+		__field(	loff_t, ret_len		)
+		__field(	int, type		)
+	),
+
+	TP_fast_assign(
+		TP_fast_assign_fsid(btrfs_sb(inode->i_sb));
+		__entry->ino		= inode->i_ino;
+		__entry->req_pos	= req_pos;
+		__entry->req_len	= req_len;
+		__entry->ret_pos	= ret_pos;
+		__entry->ret_len	= ret_len;
+		__entry->type		= type;
+	),
+
+	TP_printk_btrfs("ino=%llu pos=%llu/%llu length=%llu/%llu type=%x",
+		  __entry->ino,
+		  __entry->req_pos,
+		  __entry->ret_pos,
+		  __entry->req_len,
+		  __entry->ret_len,
+		  __entry->type
+		  )
+);
+
 TRACE_EVENT(btrfs_buffered_iomap_begin,
 
 	TP_PROTO(const struct inode *inode, loff_t pos, loff_t length, loff_t write_bytes),

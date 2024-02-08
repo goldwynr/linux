@@ -7886,6 +7886,7 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 
 	btrfs_em_to_iomap(inode, em, iomap, start, false);
 	iomap->private = path;
+	trace_btrfs_read_iomap_begin(inode, pos, length, iomap->offset, iomap->length, (int)iomap->type);
 	free_extent_map(em);
 
 	return 0;
