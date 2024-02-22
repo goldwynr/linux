@@ -435,7 +435,7 @@ static inline void btrfs_cleanup_ordered_extents(struct btrfs_inode *inode,
 		put_page(page);
 	}
 
-	return btrfs_mark_ordered_io_finished(inode, NULL, offset, bytes, false);
+	return btrfs_mark_ordered_io_finished(inode, offset, bytes, false);
 }
 
 static int btrfs_dirty_inode(struct btrfs_inode *inode);
@@ -7209,7 +7209,7 @@ static int btrfs_dio_iomap_end(struct inode *inode, loff_t pos, loff_t length,
 		pos += submitted;
 		length -= submitted;
 		if (write)
-			btrfs_finish_ordered_extent(dio_data->ordered, NULL,
+			btrfs_finish_ordered_extent(dio_data->ordered,
 						    pos, length, false);
 		else
 			unlock_extent(&BTRFS_I(inode)->io_tree, pos,
@@ -7241,7 +7241,7 @@ static void btrfs_dio_end_io(struct btrfs_bio *bbio)
 	}
 
 	if (btrfs_op(bio) == BTRFS_MAP_WRITE) {
-		btrfs_finish_ordered_extent(bbio->ordered, NULL,
+		btrfs_finish_ordered_extent(bbio->ordered,
 					    dip->file_offset, dip->bytes,
 					    !bio->bi_status);
 	} else {
@@ -7283,7 +7283,7 @@ static void btrfs_dio_submit_io(const struct iomap_iter *iter, struct bio *bio,
 
 		ret = btrfs_extract_ordered_extent(bbio, dio_data->ordered);
 		if (ret) {
-			btrfs_finish_ordered_extent(dio_data->ordered, NULL,
+			btrfs_finish_ordered_extent(dio_data->ordered,
 						    file_offset, dip->bytes,
 						    !ret);
 			bio->bi_status = errno_to_blk_status(ret);
@@ -7506,7 +7506,7 @@ static void btrfs_writepages_endio(struct btrfs_bio *bbio)
 	struct btrfs_writeback *bwb = bbio->bwb;
 	int error = blk_status_to_errno(bio->bi_status);
 
-	btrfs_mark_ordered_io_finished(BTRFS_I(inode), NULL, ioend->io_offset, ioend->io_size, !error);
+	btrfs_mark_ordered_io_finished(BTRFS_I(inode), ioend->io_offset, ioend->io_size, !error);
 	bio_for_each_folio_all(fi, bio) {
 		folio_clear_ordered(fi.folio);
 		if (error)

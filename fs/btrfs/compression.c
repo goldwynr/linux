@@ -279,7 +279,7 @@ static void btrfs_finish_compressed_write_work(struct work_struct *work)
 	if (cb->orig_bbio)
 		btrfs_bio_end_io(cb->orig_bbio, status);
 	else
-		btrfs_finish_ordered_extent(cb->bbio.ordered, NULL, cb->start,
+		btrfs_finish_ordered_extent(cb->bbio.ordered, cb->start,
 				cb->len, status == BLK_STS_OK);
 
 	btrfs_free_compressed_pages(cb);

@@ -303,30 +303,13 @@ static void finish_ordered_fn(struct btrfs_work *work)
 }
 
 static bool can_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
-				      struct page *page, u64 file_offset,
+				      u64 file_offset,
 				      u64 len, bool uptodate)
 {
 	struct btrfs_inode *inode = BTRFS_I(ordered->inode);
 	struct btrfs_fs_info *fs_info = inode->root->fs_info;
 
 	lockdep_assert_held(&inode->ordered_tree_lock);
-
-	if (page) {
-		ASSERT(page->mapping);
-		ASSERT(page_offset(page) <= file_offset);
-		ASSERT(file_offset + len <= page_offset(page) + PAGE_SIZE);
-
-		/*
-		 * Ordered (Private2) bit indicates whether we still have
-		 * pending io unfinished for the ordered extent.
-		 *
-		 * If there's no such bit, we need to skip to next range.
-		 */
-		if (!btrfs_folio_test_ordered(fs_info, page_folio(page),
-					      file_offset, len))
-			return false;
-		btrfs_folio_clear_ordered(fs_info, page_folio(page), file_offset, len);
-	}
 
 	/* Now we're fine to update the accounting. */
 	if (WARN_ON_ONCE(len > ordered->bytes_left)) {
@@ -369,7 +352,7 @@ static void btrfs_queue_ordered_fn(struct btrfs_ordered_extent *ordered)
 }
 
 bool btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
-				 struct page *page, u64 file_offset, u64 len,
+				 u64 file_offset, u64 len,
 				 bool uptodate)
 {
 	struct btrfs_inode *inode = BTRFS_I(ordered->inode);
@@ -379,7 +362,7 @@ bool btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
 	trace_btrfs_finish_ordered_extent(inode, file_offset, len, uptodate);
 
 	spin_lock_irqsave(&inode->ordered_tree_lock, flags);
-	ret = can_finish_ordered_extent(ordered, page, file_offset, len, uptodate);
+	ret = can_finish_ordered_extent(ordered, file_offset, len, uptodate);
 	spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
 
 	if (ret)
@@ -401,7 +384,7 @@ bool btrfs_finish_ordered_extent(struct btrfs_ordered_extent *ordered,
  * extent(s) covering it.
  */
 void btrfs_mark_ordered_io_finished(struct btrfs_inode *inode,
-				    struct page *page, u64 file_offset,
+				    u64 file_offset,
 				    u64 num_bytes, bool uptodate)
 {
 	struct rb_node *node;
@@ -465,7 +448,7 @@ void btrfs_mark_ordered_io_finished(struct btrfs_inode *inode,
 		ASSERT(end + 1 - cur < U32_MAX);
 		len = end + 1 - cur;
 
-		if (can_finish_ordered_extent(entry, page, cur, len, uptodate)) {
+		if (can_finish_ordered_extent(entry, cur, len, uptodate)) {
 			spin_unlock_irqrestore(&inode->ordered_tree_lock, flags);
 			btrfs_queue_ordered_fn(entry);
 			spin_lock_irqsave(&inode->ordered_tree_lock, flags);
