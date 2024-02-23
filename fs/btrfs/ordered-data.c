@@ -177,6 +177,7 @@ static struct btrfs_ordered_extent *alloc_ordered_extent(
 	entry->ram_bytes = ram_bytes;
 	entry->disk_bytenr = disk_bytenr;
 	entry->disk_num_bytes = disk_num_bytes;
+	entry->writeback_end = file_offset;
 	entry->offset = offset;
 	entry->bytes_left = num_bytes;
 	entry->inode = igrab(&inode->vfs_inode);

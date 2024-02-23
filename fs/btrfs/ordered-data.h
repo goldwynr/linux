@@ -108,6 +108,9 @@ struct btrfs_ordered_extent {
 	u64 disk_num_bytes;
 	u64 offset;
 
+	/* offset of the last byte scheduled for writeback */
+	u64 writeback_end;
+
 	/* number of bytes that still need writing */
 	u64 bytes_left;
 
