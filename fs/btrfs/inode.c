@@ -7173,6 +7173,7 @@ static int btrfs_dio_iomap_begin(struct inode *inode, loff_t start,
 	iomap->length = len;
 	free_extent_map(em);
 
+	trace_btrfs_dio_iomap_begin(inode, start, len, write);
 	return 0;
 
 unlock_err:
