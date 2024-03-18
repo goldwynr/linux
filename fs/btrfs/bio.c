@@ -322,6 +322,7 @@ static void btrfs_check_read_bio(struct btrfs_bio *bbio, struct btrfs_device *de
 
 	if (bbio->csum != bbio->csum_inline)
 		kfree(bbio->csum);
+	bbio->csum = NULL;
 
 	if (fbio)
 		btrfs_repair_done(fbio);
