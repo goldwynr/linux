@@ -1198,6 +1198,77 @@ static int btrfs_write_check(struct kiocb *iocb, struct iov_iter *from,
 	return 0;
 }
 
+static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
+		size_t length, struct btrfs_iomap *bi)
+{
+	int ret;
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	size_t sector_offset = pos & (fs_info->sectorsize - 1);
+	size_t write_bytes = length;
+	bool nowait = false;
+
+	bi->extents_locked = false;
+	bi->cached_state = NULL;
+	bi->metadata_only = false;
+
+	extent_changeset_release(bi->data_reserved);
+	ret = btrfs_check_data_free_space(BTRFS_I(inode),
+			&bi->data_reserved, pos,
+			write_bytes, nowait);
+	if (ret < 0) {
+		int can_nocow;
+
+		if (nowait && (ret == -ENOSPC || ret == -EAGAIN))
+			return -EAGAIN;
+
+		/*
+		 * If we don't have to COW at the offset, reserve
+		 * metadata only. write_bytes may get smaller than
+		 * requested here.
+		 */
+		can_nocow = btrfs_check_nocow_lock(BTRFS_I(inode), pos,
+				&write_bytes, nowait);
+		if (can_nocow < 0)
+			return can_nocow;
+		bi->metadata_only = true;
+	}
+
+	bi->reserved_bytes = round_up(write_bytes + sector_offset,
+			fs_info->sectorsize);
+	WARN_ON(bi->reserved_bytes == 0);
+	ret = btrfs_delalloc_reserve_metadata(BTRFS_I(inode),
+			bi->reserved_bytes, bi->reserved_bytes, nowait);
+	if (ret) {
+		if (!bi->metadata_only)
+			btrfs_free_reserved_data_space(BTRFS_I(inode),
+					bi->data_reserved, pos,
+					write_bytes);
+		else
+			btrfs_check_nocow_unlock(BTRFS_I(inode));
+
+		if (nowait && ret == -ENOSPC)
+			ret = -EAGAIN;
+		return ret;
+	}
+
+again:
+	ret = lock_and_cleanup_extent_if_need(BTRFS_I(inode), NULL,
+			0, pos, write_bytes, &bi->lockstart,
+			&bi->lockend, nowait, &bi->cached_state);
+	if (ret < 0) {
+		if (!nowait && ret == -EAGAIN)
+			goto again;
+
+		btrfs_delalloc_release_extents(BTRFS_I(inode),
+				bi->reserved_bytes);
+	} else {
+		bi->extents_locked = true;
+		ret = 0;
+	}
+
+	return ret;
+}
+
 static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 					       struct iov_iter *i)
 {
