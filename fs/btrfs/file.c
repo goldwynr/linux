@@ -1269,6 +1269,61 @@ again:
 	return ret;
 }
 
+static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
+		loff_t length, ssize_t written, struct btrfs_iomap *bi)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
+	struct btrfs_inode *btrfs_inode = BTRFS_I(inode);
+	loff_t block_start = round_down(pos, fs_info->sectorsize);
+	loff_t block_end = round_up(pos + written, fs_info->sectorsize) - 1;
+	size_t block_len = block_end + 1 - block_start;
+	size_t release_bytes = 0;
+	unsigned int extra_bits = 0;
+	int ret = 0;
+
+	if (bi->metadata_only)
+		extra_bits |= EXTENT_NORESERVE;
+
+	/*
+	 * The pages may have already been dirty, clear out old accounting so
+	 * we can set things up properly
+	 */
+	clear_extent_bit(&btrfs_inode->io_tree, block_start, block_end,
+			EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
+			&bi->cached_state);
+
+	ret = btrfs_set_extent_delalloc(btrfs_inode, block_start, block_end,
+			extra_bits, &bi->cached_state);
+
+	if (bi->reserved_bytes > block_len) {
+		/* release everything except the sectors we dirtied */
+		release_bytes = bi->reserved_bytes - block_len;
+		if (bi->metadata_only)
+			btrfs_delalloc_release_metadata(BTRFS_I(inode),
+					release_bytes, true);
+		else
+			btrfs_delalloc_release_space(BTRFS_I(inode),
+					bi->data_reserved, block_end,
+					release_bytes, true);
+	}
+
+	/*
+	 * If we have not locked the extent range, because the range's
+	 * start offset is >= i_size, we might still have a non-NULL
+	 * cached extent state, acquired while marking the extent range
+	 * as delalloc through btrfs_dirty_pages(). Therefore free any
+	 * possible cached extent state to avoid a memory leak.
+	 */
+	if (bi->extents_locked)
+		unlock_extent(&BTRFS_I(inode)->io_tree, bi->lockstart,
+				bi->lockend, &bi->cached_state);
+	else
+		free_extent_state(bi->cached_state);
+
+	btrfs_delalloc_release_extents(BTRFS_I(inode), bi->reserved_bytes);
+	return ret;
+}
+
 static noinline ssize_t btrfs_buffered_write(struct kiocb *iocb,
 					       struct iov_iter *i)
 {
