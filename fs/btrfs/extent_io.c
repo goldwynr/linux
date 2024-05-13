@@ -1176,14 +1176,16 @@ static int btrfs_read_iomap_begin(struct inode *inode, loff_t pos,
 {
 	struct btrfs_fs_info *fs_info = btrfs_sb(inode->i_sb);
 	struct extent_map *em;
+	struct btrfs_path *path = NULL;
 	u64 start = round_down(pos, fs_info->sectorsize);
 	u64 end = round_up(pos + length, fs_info->sectorsize) - 1;
 
-	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1, NULL);
+	em = btrfs_get_extent(BTRFS_I(inode), NULL, start, end - start + 1, &path);
 	if (IS_ERR(em))
 		return PTR_ERR(em);
 
 	btrfs_em_to_iomap(inode, em, iomap, start, false);
+	iomap->private = path;
 	free_extent_map(em);
 
 	return 0;

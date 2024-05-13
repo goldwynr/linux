@@ -7205,8 +7205,23 @@ static void btrfs_put_folio(struct inode *inode, loff_t pos,
 	folio_put(folio);
 }
 
+static int btrfs_iomap_read_inline(const struct iomap *iomap, struct folio *folio)
+{
+	struct btrfs_path *path = iomap->private;
+	struct inode *inode = folio->mapping->host;
+	int ret;
+
+	ret = read_inline_extent(BTRFS_I(inode), path, folio_page(folio, 0));
+	if (ret == 0)
+		folio_mark_uptodate(folio);
+	btrfs_release_path(path);
+	btrfs_free_path(path);
+	return ret;
+}
+
 const struct iomap_folio_ops btrfs_iomap_folio_ops = {
 	.put_folio = btrfs_put_folio,
+	.read_inline = btrfs_iomap_read_inline,
 };
 
 void btrfs_em_to_iomap(struct inode *inode,
