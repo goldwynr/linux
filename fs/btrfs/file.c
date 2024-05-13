@@ -1198,6 +1198,31 @@ static int btrfs_write_check(struct kiocb *iocb, struct iov_iter *from,
 	return 0;
 }
 
+/*
+ * btrfs_iomap_release - release reservation passed as length and free
+ * the btrfs_iomap structure
+ */
+static void btrfs_iomap_release(struct btrfs_inode *inode,
+		loff_t pos, size_t length, struct btrfs_iomap *bi)
+{
+	struct btrfs_fs_info *fs_info = btrfs_sb(inode->vfs_inode.i_sb);
+
+	if (length) {
+		if (bi->metadata_only) {
+			btrfs_delalloc_release_metadata(inode,
+					length, true);
+		} else {
+			btrfs_delalloc_release_space(inode,
+					bi->data_reserved,
+					round_down(pos, fs_info->sectorsize),
+					length, true);
+		}
+	}
+	btrfs_delalloc_release_extents(inode, bi->reserved_bytes);
+	extent_changeset_free(bi->data_reserved);
+	kfree(bi);
+}
+
 static int btrfs_buffered_iomap_begin(struct inode *inode, loff_t pos,
 		size_t length, struct btrfs_iomap *bi)
 {
@@ -1295,18 +1320,6 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
 	ret = btrfs_set_extent_delalloc(btrfs_inode, block_start, block_end,
 			extra_bits, &bi->cached_state);
 
-	if (bi->reserved_bytes > block_len) {
-		/* release everything except the sectors we dirtied */
-		release_bytes = bi->reserved_bytes - block_len;
-		if (bi->metadata_only)
-			btrfs_delalloc_release_metadata(BTRFS_I(inode),
-					release_bytes, true);
-		else
-			btrfs_delalloc_release_space(BTRFS_I(inode),
-					bi->data_reserved, block_end,
-					release_bytes, true);
-	}
-
 	/*
 	 * If we have not locked the extent range, because the range's
 	 * start offset is >= i_size, we might still have a non-NULL
@@ -1320,7 +1333,12 @@ static int btrfs_buffered_iomap_end(struct inode *inode, loff_t pos,
 	else
 		free_extent_state(bi->cached_state);
 
-	btrfs_delalloc_release_extents(BTRFS_I(inode), bi->reserved_bytes);
+	if (bi->reserved_bytes > block_len) {
+		/* release everything except the sectors we dirtied */
+		release_bytes = bi->reserved_bytes - block_len;
+	}
+
+	btrfs_iomap_release(BTRFS_I(inode), block_start, release_bytes, bi);
 	return ret;
 }
 
